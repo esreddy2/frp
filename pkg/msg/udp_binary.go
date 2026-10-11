@@ -311,7 +311,12 @@ func unexpectedV2UDPPacketType(frame *wire.Frame) error {
 	if typeID == V2TypeUDPPacket {
 		return fmt.Errorf("received JSON UDP packet after binary codec negotiation")
 	}
-	return fmt.Errorf("unexpected message type %d, want %d", typeID, V2TypeUDPPacketBinary)
+	// Use the constructor table to surface a human-readable type name for
+	// unknown message types instead of a bare numeric type ID.
+	if _, ok := v2MsgConstructors[typeID]; ok {
+		return fmt.Errorf("unexpected UDP packet message type %d", typeID)
+	}
+	return fmt.Errorf("unknown message type %d", typeID)
 }
 
 // NewUDPPacketReadWriter selects the negotiated packet codec without changing

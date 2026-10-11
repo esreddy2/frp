@@ -27,6 +27,7 @@ import (
 	libio "github.com/fatedier/golib/io"
 	fmux "github.com/fatedier/yamux"
 	quic "github.com/quic-go/quic-go"
+	"github.com/samber/lo"
 	"golang.org/x/time/rate"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
@@ -406,12 +407,13 @@ func (qs *QUICTunnelSession) Init(listenConn *net.UDPConn, raddr *net.UDPAddr) e
 		return fmt.Errorf("create tls config error: %v", err)
 	}
 	tlsConfig.NextProtos = []string{"frp"}
-	quicConn, err := quic.Dial(context.Background(), listenConn, raddr, tlsConfig,
-		&quic.Config{
-			MaxIdleTimeout:     time.Duration(qs.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-			MaxIncomingStreams: int64(qs.clientCfg.Transport.QUIC.MaxIncomingStreams),
-			KeepAlivePeriod:    time.Duration(qs.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-		})
+	quicConfig := &quic.Config{
+		MaxIdleTimeout:     time.Duration(qs.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+		MaxIncomingStreams: int64(qs.clientCfg.Transport.QUIC.MaxIncomingStreams),
+		KeepAlivePeriod:    time.Duration(qs.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+		EnableDatagrams:    lo.FromPtr(qs.clientCfg.Transport.QUIC.EnableDatagrams),
+	}
+	quicConn, err := quic.Dial(context.Background(), listenConn, raddr, tlsConfig, quicConfig)
 	if err != nil {
 		return fmt.Errorf("dial quic error: %v", err)
 	}

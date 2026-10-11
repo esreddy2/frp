@@ -95,14 +95,12 @@ func (c *Conn) WriteFrame(f *Frame) error {
 		return fmt.Errorf("frame payload length %d exceeds limit %d", len(f.Payload), c.maxFramePayloadSize)
 	}
 
-	header := make([]byte, 8)
-	binary.BigEndian.PutUint16(header[0:2], f.Type)
-	binary.BigEndian.PutUint16(header[2:4], f.Flags)
-	binary.BigEndian.PutUint32(header[4:8], uint32(len(f.Payload)))
-	if _, err := c.rw.Write(header); err != nil {
-		return err
-	}
-	_, err := c.rw.Write(f.Payload)
+	buf := make([]byte, 8+len(f.Payload))
+	binary.BigEndian.PutUint16(buf[0:2], f.Type)
+	binary.BigEndian.PutUint16(buf[2:4], f.Flags)
+	binary.BigEndian.PutUint32(buf[4:8], uint32(len(f.Payload)))
+	copy(buf[8:], f.Payload)
+	_, err := c.rw.Write(buf)
 	return err
 }
 
@@ -188,8 +186,9 @@ type MessageCapabilities struct {
 }
 
 type CryptoCapabilities struct {
-	Algorithms   []string `json:"algorithms,omitempty"`
-	ClientRandom []byte   `json:"clientRandom,omitempty"`
+	Algorithms     []string `json:"algorithms,omitempty"`
+	ClientRandom   []byte   `json:"clientRandom,omitempty"`
+	ClientKeyShare []byte   `json:"clientKeyShare,omitempty"`
 }
 
 type ServerHello struct {
@@ -208,8 +207,9 @@ type MessageSelection struct {
 }
 
 type CryptoSelection struct {
-	Algorithm    string `json:"algorithm,omitempty"`
-	ServerRandom []byte `json:"serverRandom,omitempty"`
+	Algorithm      string `json:"algorithm,omitempty"`
+	ServerRandom   []byte `json:"serverRandom,omitempty"`
+	ServerKeyShare []byte `json:"serverKeyShare,omitempty"`
 }
 
 func clientHelloWithCryptoRandom(bootstrap BootstrapInfo, clientRandom []byte) ClientHello {

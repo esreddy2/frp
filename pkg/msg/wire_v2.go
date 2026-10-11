@@ -67,17 +67,21 @@ var v2MsgTypeMap = map[uint16]any{
 	V2TypeNatHoleReport:      NatHoleReport{},
 }
 
-var v2MsgReflectTypeMap, v2MsgTypeIDMap = buildV2MsgTypeMaps()
+var v2MsgConstructors, v2MsgTypeIDMap = buildV2MsgTypeMaps()
 
-func buildV2MsgTypeMaps() (map[uint16]reflect.Type, map[reflect.Type]uint16) {
-	reflectTypeMap := make(map[uint16]reflect.Type, len(v2MsgTypeMap))
+// buildV2MsgTypeMaps returns a constructor table keyed by message type ID and
+// a reverse map from reflect.Type to type ID. Using a constructor closure
+// instead of a reflect.Type lookup avoids a heap allocation and an interface
+// boxing on every decoded control message.
+func buildV2MsgTypeMaps() (map[uint16]func() Message, map[reflect.Type]uint16) {
+	constructors := make(map[uint16]func() Message, len(v2MsgTypeMap))
 	typeIDMap := make(map[reflect.Type]uint16, len(v2MsgTypeMap))
 	for typeID, m := range v2MsgTypeMap {
 		t := reflect.TypeOf(m)
-		reflectTypeMap[typeID] = t
+		constructors[typeID] = func() Message { return reflect.New(t).Interface().(Message) }
 		typeIDMap[t] = typeID
 	}
-	return reflectTypeMap, typeIDMap
+	return constructors, typeIDMap
 }
 
 type V2ReadWriter struct {
@@ -128,11 +132,11 @@ func DecodeV2MessageFrame(f *wire.Frame) (Message, error) {
 		return nil, fmt.Errorf("message frame payload too short")
 	}
 	typeID := binary.BigEndian.Uint16(f.Payload[:2])
-	t, ok := v2MsgReflectTypeMap[typeID]
+	constructor, ok := v2MsgConstructors[typeID]
 	if !ok {
 		return nil, fmt.Errorf("unknown v2 message type %d", typeID)
 	}
-	m := reflect.New(t).Interface()
+	m := constructor()
 	if err := json.Unmarshal(f.Payload[2:], m); err != nil {
 		return nil, err
 	}
@@ -158,11 +162,10 @@ func DecodeV2MessageFrameInto(f *wire.Frame, out Message) error {
 		return fmt.Errorf("unknown v2 message type %s", elemType.String())
 	}
 	if typeID != expectedTypeID {
-		actualType, ok := v2MsgReflectTypeMap[typeID]
-		if !ok {
-			return fmt.Errorf("unknown v2 message type %d", typeID)
+		if _, ok := v2MsgConstructors[typeID]; ok {
+			return fmt.Errorf("unexpected message type %d, want %s", typeID, elemType.String())
 		}
-		return fmt.Errorf("unexpected message type %s, want %s", actualType.String(), elemType.String())
+		return fmt.Errorf("unknown v2 message type %d", typeID)
 	}
 	return json.Unmarshal(f.Payload[2:], out)
 }

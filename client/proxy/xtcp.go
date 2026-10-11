@@ -24,6 +24,7 @@ import (
 
 	fmux "github.com/fatedier/yamux"
 	"github.com/quic-go/quic-go"
+	"github.com/samber/lo"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
@@ -187,13 +188,17 @@ func (pxy *XTCPProxy) listenByQUIC(listenConn *net.UDPConn, _ *net.UDPAddr, star
 		return
 	}
 	tlsConfig.NextProtos = []string{"frp"}
-	quicListener, err := quic.Listen(listenConn, tlsConfig,
-		&quic.Config{
-			MaxIdleTimeout:     time.Duration(pxy.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-			MaxIncomingStreams: int64(pxy.clientCfg.Transport.QUIC.MaxIncomingStreams),
-			KeepAlivePeriod:    time.Duration(pxy.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-		},
-	)
+	quicConfig := &quic.Config{
+		MaxIdleTimeout:     time.Duration(pxy.clientCfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+		MaxIncomingStreams: int64(pxy.clientCfg.Transport.QUIC.MaxIncomingStreams),
+		KeepAlivePeriod:    time.Duration(pxy.clientCfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+		EnableDatagrams:    lo.FromPtr(pxy.clientCfg.Transport.QUIC.EnableDatagrams),
+		// The visitor authenticates itself with the first message it
+		// sends, so this listener must not accept replayable 0-RTT early
+		// data. See the QUIC listener in server/service.go.
+		Allow0RTT: false,
+	}
+	quicListener, err := quic.Listen(listenConn, tlsConfig, quicConfig)
 	if err != nil {
 		xl.Warnf("dial quic error: %v", err)
 		return

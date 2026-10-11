@@ -101,6 +101,7 @@ func NewWrapper(
 	msgTransporter transport.MessageTransporter,
 	vnetController *vnet.Controller,
 	udpPacketCodec string,
+	connector MessageConnector,
 ) *Wrapper {
 	baseInfo := cfg.GetBaseConfig()
 	xl := xlog.FromContextSafe(ctx).Spawn().AppendPrefix(baseInfo.Name)
@@ -129,7 +130,7 @@ func NewWrapper(
 		xl.Tracef("enable health check monitor")
 	}
 
-	pw.pxy = NewProxy(pw.ctx, pw.Cfg, clientCfg, encryptionKey, pw.msgTransporter, pw.vnetController, udpPacketCodec)
+	pw.pxy = NewProxy(pw.ctx, pw.Cfg, clientCfg, encryptionKey, pw.msgTransporter, pw.vnetController, udpPacketCodec, connector)
 	return pw
 }
 
@@ -176,7 +177,13 @@ func (pw *Wrapper) Stop() {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 	close(pw.closeCh)
-	close(pw.healthNotifyCh)
+	// The health notification channel is not closed. The callbacks of the
+	// health check send on it, and a send on a closed channel panics even
+	// when it is in a select with a default branch. Closing the channel
+	// while a callback sends on it is a data race as well: the runtime
+	// records a send as a read of the channel and a close as a write of it.
+	// The stop channel ends the goroutines that wait for the notification
+	// instead.
 	pw.pxy.Close()
 	if pw.monitor != nil {
 		pw.monitor.Stop()
@@ -199,6 +206,12 @@ func (pw *Wrapper) checkWorker() {
 		// let monitor do check request first
 		time.Sleep(500 * time.Millisecond)
 	}
+	// Reuse a single ticker instead of allocating a fresh timer with
+	// time.After on every loop iteration. Each time.After call allocates a
+	// Timer that is only freed by the GC, which is pure waste on a periodic
+	// worker that runs for the lifetime of every proxy.
+	ticker := time.NewTicker(statusCheckInterval)
+	defer ticker.Stop()
 	for {
 		// check proxy status
 		now := time.Now()
@@ -216,11 +229,13 @@ func (pw *Wrapper) checkWorker() {
 				pw.Cfg.MarshalToMsg(&newProxyMsg)
 				newProxyMsg.ProxyName = pw.wireName
 				pw.lastSendStartMsg = now
+				pw.mu.Unlock()
 				_ = pw.handler(&event.StartProxyPayload{
 					NewProxyMsg: &newProxyMsg,
 				})
+			} else {
+				pw.mu.Unlock()
 			}
-			pw.mu.Unlock()
 		} else {
 			pw.mu.Lock()
 			if pw.Phase == ProxyPhaseRunning || pw.Phase == ProxyPhaseWaitStart {
@@ -234,7 +249,7 @@ func (pw *Wrapper) checkWorker() {
 		select {
 		case <-pw.closeCh:
 			return
-		case <-time.After(statusCheckInterval):
+		case <-ticker.C:
 		case <-pw.healthNotifyCh:
 		}
 	}
@@ -246,6 +261,9 @@ func (pw *Wrapper) statusNormalCallback() {
 	_ = errors.PanicToError(func() {
 		select {
 		case pw.healthNotifyCh <- struct{}{}:
+		case <-pw.closeCh:
+			// The proxy is stopped: nobody waits for the notification
+			// anymore.
 		default:
 		}
 	})
@@ -258,6 +276,9 @@ func (pw *Wrapper) statusFailedCallback() {
 	_ = errors.PanicToError(func() {
 		select {
 		case pw.healthNotifyCh <- struct{}{}:
+		case <-pw.closeCh:
+			// The proxy is stopped: nobody waits for the notification
+			// anymore.
 		default:
 		}
 	})
