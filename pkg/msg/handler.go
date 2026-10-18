@@ -18,7 +18,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"reflect"
 	"sync"
 	"time"
 
@@ -111,11 +110,12 @@ func AsyncHandler(f func(Message)) func(Message) {
 type Dispatcher struct {
 	rw ReadWriter
 
-	sendCh      chan Message
-	doneCh      chan struct{}
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	msgHandlers map[reflect.Type]func(Message)
+	sendCh   chan Message
+	doneCh   chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	// Handlers keyed by message type byte (from msgTypeMap) for fast lookup without reflection.
+	msgHandlers map[byte]func(Message)
 }
 
 // NewDispatcher uses SetReadDeadline, when supported, and Close, when rw
@@ -129,7 +129,7 @@ func NewDispatcher(rw ReadWriter) *Dispatcher {
 		sendCh:      make(chan Message, 100),
 		doneCh:      make(chan struct{}),
 		stopCh:      make(chan struct{}),
-		msgHandlers: make(map[reflect.Type]func(Message)),
+		msgHandlers: make(map[byte]func(Message)),
 	}
 }
 
@@ -182,7 +182,7 @@ func (d *Dispatcher) readLoop() {
 		default:
 		}
 
-		if handler, ok := d.msgHandlers[reflect.TypeOf(m)]; ok {
+		if handler, ok := d.msgHandlers[messageTypeByte(m)]; ok {
 			handler(m)
 		}
 	}
@@ -215,7 +215,52 @@ func (d *Dispatcher) enqueue(m Message) error {
 }
 
 func (d *Dispatcher) RegisterHandler(msg Message, handler func(Message)) {
-	d.msgHandlers[reflect.TypeOf(msg)] = handler
+	d.msgHandlers[messageTypeByte(msg)] = handler
+}
+
+// messageTypeByte returns the message type byte for a given message.
+// Uses a type-switch to avoid reflection in the hot path.
+func messageTypeByte(m Message) byte {
+	switch m.(type) {
+	case *Login:
+		return TypeLogin
+	case *LoginResp:
+		return TypeLoginResp
+	case *NewProxy:
+		return TypeNewProxy
+	case *NewProxyResp:
+		return TypeNewProxyResp
+	case *CloseProxy:
+		return TypeCloseProxy
+	case *NewWorkConn:
+		return TypeNewWorkConn
+	case *ReqWorkConn:
+		return TypeReqWorkConn
+	case *StartWorkConn:
+		return TypeStartWorkConn
+	case *NewVisitorConn:
+		return TypeNewVisitorConn
+	case *NewVisitorConnResp:
+		return TypeNewVisitorConnResp
+	case *Ping:
+		return TypePing
+	case *Pong:
+		return TypePong
+	case *UDPPacket:
+		return TypeUDPPacket
+	case *NatHoleVisitor:
+		return TypeNatHoleVisitor
+	case *NatHoleClient:
+		return TypeNatHoleClient
+	case *NatHoleResp:
+		return TypeNatHoleResp
+	case *NatHoleSid:
+		return TypeNatHoleSid
+	case *NatHoleReport:
+		return TypeNatHoleReport
+	default:
+		return 0
+	}
 }
 
 func (d *Dispatcher) Done() chan struct{} {

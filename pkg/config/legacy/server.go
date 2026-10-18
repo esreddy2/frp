@@ -51,9 +51,11 @@ type ServerCommonConf struct {
 	// By default, the value is 0.
 	QUICBindPort int `ini:"quic_bind_port" json:"quic_bind_port"`
 	// QUIC protocol options
-	QUICKeepalivePeriod    int `ini:"quic_keepalive_period" json:"quic_keepalive_period"`
-	QUICMaxIdleTimeout     int `ini:"quic_max_idle_timeout" json:"quic_max_idle_timeout"`
-	QUICMaxIncomingStreams int `ini:"quic_max_incoming_streams" json:"quic_max_incoming_streams"`
+	QUICKeepalivePeriod    int  `ini:"quic_keepalive_period" json:"quic_keepalive_period"`
+	QUICMaxIdleTimeout     int  `ini:"quic_max_idle_timeout" json:"quic_max_idle_timeout"`
+	QUICMaxIncomingStreams int  `ini:"quic_max_incoming_streams" json:"quic_max_incoming_streams"`
+	QUICEnableDatagrams    bool `ini:"quic_enable_datagrams" json:"quic_enable_datagrams"`
+	QUICEnable0RTT         bool `ini:"quic_enable_0rtt" json:"quic_enable_0rtt"`
 	// ProxyBindAddr specifies the address that the proxy binds to. This value
 	// may be the same as BindAddr.
 	ProxyBindAddr string `ini:"proxy_bind_addr" json:"proxy_bind_addr"`

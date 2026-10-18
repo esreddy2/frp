@@ -55,6 +55,8 @@ func Convert_ClientCommonConf_To_v1(conf *ClientCommonConf) *v1.ClientCommonConf
 	out.Transport.QUIC.KeepalivePeriod = conf.QUICKeepalivePeriod
 	out.Transport.QUIC.MaxIdleTimeout = conf.QUICMaxIdleTimeout
 	out.Transport.QUIC.MaxIncomingStreams = conf.QUICMaxIncomingStreams
+	out.Transport.QUIC.EnableDatagrams = new(conf.QUICEnableDatagrams)
+	out.Transport.QUIC.Enable0RTT = new(conf.QUICEnable0RTT)
 	out.Transport.TLS.Enable = new(conf.TLSEnable)
 	out.Transport.TLS.DisableCustomTLSFirstByte = new(conf.DisableCustomTLSFirstByte)
 	out.Transport.TLS.CertFile = conf.TLSCertFile
@@ -105,6 +107,8 @@ func Convert_ServerCommonConf_To_v1(conf *ServerCommonConf) *v1.ServerConfig {
 	out.Transport.QUIC.KeepalivePeriod = conf.QUICKeepalivePeriod
 	out.Transport.QUIC.MaxIdleTimeout = conf.QUICMaxIdleTimeout
 	out.Transport.QUIC.MaxIncomingStreams = conf.QUICMaxIncomingStreams
+	out.Transport.QUIC.EnableDatagrams = new(conf.QUICEnableDatagrams)
+	out.Transport.QUIC.Enable0RTT = new(conf.QUICEnable0RTT)
 
 	out.ProxyBindAddr = conf.ProxyBindAddr
 	out.VhostHTTPPort = conf.VhostHTTPPort
@@ -193,7 +197,14 @@ func Convert_ProxyConf_To_v1_Base(conf ProxyConf) *v1.ProxyBaseConfig {
 	out.Transport.UseCompression = base.UseCompression
 	out.Transport.BandwidthLimit = base.BandwidthLimit
 	out.Transport.BandwidthLimitMode = base.BandwidthLimitMode
-	out.Transport.ProxyProtocolVersion = base.ProxyProtocolVersion
+	proxyProtocol := base.ProxyProtocol
+	if proxyProtocol == "" {
+		proxyProtocol = base.ProxyProtocolVersion
+	}
+	out.Transport.ProxyProtocol = proxyProtocol
+	out.Transport.ProxyProtocolVersion = proxyProtocol
+	out.Transport.ProxyProtocolMode = base.ProxyProtocolMode
+	out.Transport.SocketMark = base.SocketMark
 
 	out.LoadBalancer.Group = base.Group
 	out.LoadBalancer.GroupKey = base.GroupKey

@@ -166,10 +166,15 @@ type BaseProxyConf struct {
 	// of the same group. By default, this value is "".
 	GroupKey string `ini:"group_key" json:"group_key"`
 
-	// ProxyProtocolVersion specifies which protocol version to use. Valid
-	// values include "v1", "v2", and "". If the value is "", a protocol
-	// version will be automatically selected. By default, this value is "".
+	// ProxyProtocol specifies which protocol to use: "v1", "v2", or "tproxy".
+	ProxyProtocol string `ini:"proxy_protocol" json:"proxy_protocol"`
+	// ProxyProtocolVersion is a backward-compatible alias for ProxyProtocol.
 	ProxyProtocolVersion string `ini:"proxy_protocol_version" json:"proxy_protocol_version"`
+	// ProxyProtocolMode specifies how proxy protocol headers are sent for UDP proxies.
+	// Valid values are "first-packet" and "per-packet". By default, this value is "first-packet".
+	ProxyProtocolMode string `ini:"proxy_protocol_mode" json:"proxy_protocol_mode"`
+	// SocketMark sets SO_MARK on outgoing transparent connections for policy routing.
+	SocketMark int `ini:"socket_mark" json:"socket_mark"`
 
 	// BandwidthLimit limit the bandwidth
 	// 0 means no limit
