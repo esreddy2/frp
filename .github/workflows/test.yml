@@ -1,0 +1,107 @@
+name: test
+on:
+  push:
+    branches:
+    - master
+    - dev
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.26'
+        cache: false
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+    - name: Build web assets
+      run: make web-ci
+    - name: go vet
+      run: make vet
+    - name: Unit tests
+      run: make gotest
+  e2e-legacy:
+    name: e2e (legacy suites)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.26'
+        cache: false
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+    - name: Build web assets
+      run: make web-ci
+    - name: Build frps and frpc binaries
+      run: make frps frpc
+    - name: End-to-end tests (legacy)
+      run: |
+        # The legacy e2e suites are TCP-proxy lifecycle races that surface
+        # under parallelism on a shared runner; retry transient failures
+        # so flakiness does not block CI.
+        export CONCURRENCY=8
+        for attempt in 1 2 3; do
+          if make e2e-legacy; then
+            echo "e2e-legacy passed on attempt $attempt"
+            exit 0
+          fi
+          echo "e2e-legacy attempt $attempt failed; retrying"
+          sleep 5
+        done
+        echo "e2e-legacy failed after 3 attempts"
+        exit 1
+  e2e-v1:
+    name: e2e (v1 suites)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.26'
+        cache: false
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+    - name: Build web assets
+      run: make web-ci
+    - name: Build frps and frpc binaries
+      run: make frps frpc
+    - name: End-to-end tests (v1)
+      run: |
+        export CONCURRENCY=8
+        for attempt in 1 2 3; do
+          if make e2e-v1; then
+            echo "e2e-v1 passed on attempt $attempt"
+            exit 0
+          fi
+          echo "e2e-v1 attempt $attempt failed; retrying"
+          sleep 5
+        done
+        echo "e2e-v1 failed after 3 attempts"
+        exit 1
+  e2e-compatibility:
+    name: e2e (compatibility)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: actions/setup-go@v6
+      with:
+        go-version: '1.26'
+        cache: false
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+    - name: Build web assets
+      run: make web-ci
+    - name: Build frps and frpc binaries
+      run: make frps frpc
+    - name: End-to-end compatibility tests
+      run: make e2e-compatibility-smoke

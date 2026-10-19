@@ -55,6 +55,12 @@ gotest:
 e2e:
 	./hack/run-e2e.sh
 
+e2e-legacy:
+	E2E_TAG=legacy ./hack/run-e2e.sh
+
+e2e-v1:
+	E2E_TAG=v1 ./hack/run-e2e.sh
+
 e2e-trace:
 	DEBUG=true LOG_LEVEL=trace ./hack/run-e2e.sh
 
