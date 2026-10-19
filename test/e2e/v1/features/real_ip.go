@@ -2,10 +2,13 @@ package features
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	pp "github.com/pires/go-proxyproto"
@@ -275,6 +278,64 @@ var _ = ginkgo.Describe("[Feature: Real IP]", func() {
 				}
 				return true
 			})
+		})
+
+		ginkgo.It("UDP sends the header only once per flow", func() {
+			serverConf := consts.DefaultServerConfig
+			clientConf := consts.DefaultClientConfig
+
+			// The local service echoes every datagram back verbatim, so a
+			// proxy protocol header on a packet shows up in the reply.
+			localPort := f.AllocPort()
+			echoConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort})
+			framework.ExpectNoError(err)
+			defer echoConn.Close()
+			go func() {
+				buf := make([]byte, 2048)
+				for {
+					n, addr, readErr := echoConn.ReadFromUDP(buf)
+					if readErr != nil {
+						return
+					}
+					_, _ = echoConn.WriteToUDP(buf[:n], addr)
+				}
+			}()
+
+			remotePort := f.AllocPort()
+			clientConf += fmt.Sprintf(`
+			[[proxies]]
+			name = "udp"
+			type = "udp"
+			localPort = %d
+			remotePort = %d
+			transport.proxyProtocolVersion = "v2"
+			`, localPort, remotePort)
+
+			f.RunProcesses(serverConf, []string{clientConf})
+
+			// Both packets belong to the same flow: they come from the same
+			// socket, so the user address is the same for both of them.
+			conn, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(remotePort)))
+			framework.ExpectNoError(err)
+			defer conn.Close()
+			framework.ExpectNoError(conn.SetDeadline(time.Now().Add(10 * time.Second)))
+
+			buf := make([]byte, 2048)
+			_, err = conn.Write([]byte("first"))
+			framework.ExpectNoError(err)
+			n, err := conn.Read(buf)
+			framework.ExpectNoError(err)
+			framework.ExpectTrue(bytes.Contains(buf[:n], []byte("first")),
+				"the first packet of a flow must reach the service")
+
+			// The proxy protocol header describes the start of a flow, so
+			// only the first packet carries it.
+			_, err = conn.Write([]byte("second"))
+			framework.ExpectNoError(err)
+			n, err = conn.Read(buf)
+			framework.ExpectNoError(err)
+			framework.ExpectEqualValues("second", string(buf[:n]),
+				"only the first packet of a flow may carry the proxy protocol header")
 		})
 
 		ginkgo.It("HTTP", func() {

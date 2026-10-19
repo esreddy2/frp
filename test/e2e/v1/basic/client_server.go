@@ -242,6 +242,60 @@ var _ = ginkgo.Describe("[Feature: Client-Server]", func() {
 		}
 	})
 
+	ginkgo.Describe("TLS with custom certificate on an implicit TLS transport", func() {
+		// quic always runs over TLS, so the material is honored even when
+		// transport.tls.enable is false.
+		var (
+			caCrtPath                    string
+			serverCrtPath, serverKeyPath string
+			otherCACrtPath               string
+		)
+		ginkgo.JustBeforeEach(func() {
+			generator := &cert.SelfSignedCertGenerator{}
+			artifacts, err := generator.Generate("127.0.0.1")
+			framework.ExpectNoError(err)
+
+			caCrtPath = f.WriteTempFile("ca.crt", string(artifacts.CACert))
+			serverCrtPath = f.WriteTempFile("server.crt", string(artifacts.Cert))
+			serverKeyPath = f.WriteTempFile("server.key", string(artifacts.Key))
+
+			other, err := (&cert.SelfSignedCertGenerator{}).Generate("127.0.0.1")
+			framework.ExpectNoError(err)
+			otherCACrtPath = f.WriteTempFile("other-ca.crt", string(other.CACert))
+		})
+
+		ginkgo.It("quic verifies the server certificate with tls disabled", func() {
+			runClientServerTest(f, &generalTestConfigures{
+				server: fmt.Sprintf(`
+					%s
+					transport.tls.certFile = "%s"
+					transport.tls.keyFile = "%s"
+				`, renderBindPortConfig("quic"), serverCrtPath, serverKeyPath),
+				client: fmt.Sprintf(`
+					transport.protocol = "quic"
+					transport.tls.enable = false
+					transport.tls.trustedCaFile = "%s"
+				`, caCrtPath),
+			})
+		})
+
+		ginkgo.It("quic rejects a server certificate that is not trusted", func() {
+			runClientServerTest(f, &generalTestConfigures{
+				server: fmt.Sprintf(`
+					%s
+					transport.tls.certFile = "%s"
+					transport.tls.keyFile = "%s"
+				`, renderBindPortConfig("quic"), serverCrtPath, serverKeyPath),
+				client: fmt.Sprintf(`
+					transport.protocol = "quic"
+					transport.tls.enable = false
+					transport.tls.trustedCaFile = "%s"
+				`, otherCACrtPath),
+				expectError: true,
+			})
+		})
+	})
+
 	ginkgo.Describe("TLS with custom certificate and specified server name", func() {
 		var (
 			caCrtPath                    string
