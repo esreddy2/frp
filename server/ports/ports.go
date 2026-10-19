@@ -42,6 +42,9 @@ type Manager struct {
 	netType  string
 	clock    clock.WithTicker
 	mu       sync.Mutex
+	stopCh   chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewManager(netType string, bindAddr string, allowPorts []types.PortsRange) *Manager {
@@ -59,6 +62,8 @@ func newManagerWithClock(netType string, bindAddr string, allowPorts []types.Por
 		bindAddr:      bindAddr,
 		netType:       netType,
 		clock:         clk,
+		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	if len(allowPorts) > 0 {
 		for _, pair := range allowPorts {
@@ -187,7 +192,8 @@ func (pm *Manager) Release(port int) {
 
 // Release reserved port if it isn't used in last 24 hours.
 func (pm *Manager) cleanReservedPortsWorker() {
-	pm.cleanReservedPortsWorkerUntil(nil)
+	defer close(pm.done)
+	pm.cleanReservedPortsWorkerUntil(pm.stopCh)
 }
 
 func (pm *Manager) cleanReservedPortsWorkerUntil(stopCh <-chan struct{}) {
@@ -202,6 +208,16 @@ func (pm *Manager) cleanReservedPortsWorkerUntil(stopCh <-chan struct{}) {
 			return
 		}
 	}
+}
+
+// Close stops the background worker and releases resources. It waits for the
+// worker goroutine to exit so that the number of running workers is stable
+// once Close returns. Calling Close more than once is safe.
+func (pm *Manager) Close() {
+	pm.stopOnce.Do(func() {
+		close(pm.stopCh)
+	})
+	<-pm.done
 }
 
 func (pm *Manager) cleanReservedPortsOnce() {
