@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fatedier/golib/errors"
@@ -220,6 +221,7 @@ func (v *Muxer) handle(c net.Conn) {
 	})
 	if err != nil {
 		xl.Warnf("listener is already closed, ignore this request")
+		_ = c.Close()
 	}
 }
 
@@ -233,6 +235,7 @@ type Listener struct {
 	mux             *Muxer // for closing Muxer
 	accept          chan net.Conn
 	ctx             context.Context
+	closeOnce       sync.Once
 }
 
 func (l *Listener) Accept() (net.Conn, error) {
@@ -258,8 +261,10 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 func (l *Listener) Close() error {
-	l.mux.registryRouter.Del(l.name, l.location, l.routeByHTTPUser)
-	close(l.accept)
+	l.closeOnce.Do(func() {
+		l.mux.registryRouter.Del(l.name, l.location, l.routeByHTTPUser)
+		close(l.accept)
+	})
 	return nil
 }
 
