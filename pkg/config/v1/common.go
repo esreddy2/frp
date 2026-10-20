@@ -36,15 +36,24 @@ const (
 
 // QUIC protocol options
 type QUICOptions struct {
-	KeepalivePeriod    int `json:"keepalivePeriod,omitempty"`
-	MaxIdleTimeout     int `json:"maxIdleTimeout,omitempty"`
-	MaxIncomingStreams int `json:"maxIncomingStreams,omitempty"`
+	KeepalivePeriod    int   `json:"keepalivePeriod,omitempty"`
+	MaxIdleTimeout     int   `json:"maxIdleTimeout,omitempty"`
+	MaxIncomingStreams int   `json:"maxIncomingStreams,omitempty"`
+	EnableDatagrams    *bool `json:"enableDatagrams,omitempty"`
+	// Enable0RTT does not enable QUIC 0-RTT. frp cannot use 0-RTT safely:
+	// the first message frp sends on a QUIC connection carries the client's
+	// credential, and 0-RTT early data is replayable, so the server refuses
+	// early data. The option is kept for configuration compatibility and
+	// only enables the client's QUIC address validation token cache.
+	Enable0RTT *bool `json:"enable0Rtt,omitempty"`
 }
 
 func (c *QUICOptions) Complete() {
 	c.KeepalivePeriod = util.EmptyOr(c.KeepalivePeriod, 10)
 	c.MaxIdleTimeout = util.EmptyOr(c.MaxIdleTimeout, 30)
 	c.MaxIncomingStreams = util.EmptyOr(c.MaxIncomingStreams, 100000)
+	c.EnableDatagrams = util.EmptyOr(c.EnableDatagrams, new(true))
+	c.Enable0RTT = util.EmptyOr(c.Enable0RTT, new(false))
 }
 
 type WebServerConfig struct {

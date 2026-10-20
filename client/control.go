@@ -101,6 +101,7 @@ func NewControl(ctx context.Context, sessionCtx *SessionContext) (*Control, erro
 		ctl.msgTransporter,
 		sessionCtx.VnetController,
 		sessionCtx.UDPPacketCodec,
+		sessionCtx.Connector,
 	)
 	ctl.vm = visitor.NewManager(ctl.ctx, sessionCtx.RunID, sessionCtx.Common,
 		ctl.connectServer, ctl.msgTransporter, sessionCtx.VnetController, sessionCtx.UDPPacketCodec)
