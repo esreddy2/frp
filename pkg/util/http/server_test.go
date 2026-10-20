@@ -15,10 +15,13 @@
 package http
 
 import (
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -52,4 +55,83 @@ func TestNewServerDoesNotLeakListenerOnTLSFailure(t *testing.T) {
 	ln, err = net.Listen("tcp", address)
 	require.NoError(t, err, "web server port was not released")
 	require.NoError(t, ln.Close())
+}
+
+func TestPprofHandlersRequireAuth(t *testing.T) {
+	t.Run("with credentials requires Basic Auth", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := ln.Addr().(*net.TCPAddr).Port
+		require.NoError(t, ln.Close())
+
+		svr, err := NewServer(v1.WebServerConfig{
+			Addr:        "127.0.0.1",
+			Port:        port,
+			User:        "admin",
+			Password:    "secret",
+			PprofEnable: true,
+		})
+		require.NoError(t, err)
+		defer svr.Close()
+
+		go svr.Run()
+		require.Eventually(t, func() bool {
+			_, err := http.Get("http://" + ln.Addr().String() + "/debug/pprof/cmdline")
+			return err == nil
+		}, 5*time.Second, 10*time.Millisecond, "pprof endpoint did not accept connections")
+
+		// Without auth: 401 Unauthorized.
+		resp, err := http.Get("http://" + ln.Addr().String() + "/debug/pprof/cmdline")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		resp.Body.Close()
+
+		// With correct auth: 200 OK.
+		req, err := http.NewRequest(http.MethodGet, "http://"+ln.Addr().String()+"/debug/pprof/cmdline", nil)
+		require.NoError(t, err)
+		req.SetBasicAuth("admin", "secret")
+		resp, err = http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.NotEmpty(t, body)
+
+		// With wrong auth: 401 Unauthorized.
+		req, err = http.NewRequest(http.MethodGet, "http://"+ln.Addr().String()+"/debug/pprof/profile", nil)
+		require.NoError(t, err)
+		req.SetBasicAuth("admin", "wrong")
+		resp, err = http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		resp.Body.Close()
+	})
+
+	t.Run("without credentials is openly accessible", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		port := ln.Addr().(*net.TCPAddr).Port
+		require.NoError(t, ln.Close())
+
+		svr, err := NewServer(v1.WebServerConfig{
+			Addr:        "127.0.0.1",
+			Port:        port,
+			PprofEnable: true,
+		})
+		require.NoError(t, err)
+		defer svr.Close()
+
+		go svr.Run()
+		require.Eventually(t, func() bool {
+			_, err := http.Get("http://" + ln.Addr().String() + "/debug/pprof/cmdline")
+			return err == nil
+		}, 5*time.Second, 10*time.Millisecond, "pprof endpoint did not accept connections")
+
+		// No auth configured: request succeeds without credentials.
+		resp, err := http.Get("http://" + ln.Addr().String() + "/debug/pprof/cmdline")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		resp.Body.Close()
+	})
 }
