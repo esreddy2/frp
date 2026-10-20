@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -250,4 +251,59 @@ func TestNewOidcAuthSetterRejectsInvalidStaticConfig(t *testing.T) {
 	})
 	r.Error(err)
 	r.Contains(err.Error(), "cannot specify both auth.oidc.audience and auth.oidc.additionalEndpointParams.audience")
+}
+
+// subjectTokenVerifier maps a token to the subject it belongs to, so that
+// two different tokens can carry the same subject.
+type subjectTokenVerifier struct {
+	subjects map[string]string
+}
+
+func (m *subjectTokenVerifier) Verify(_ context.Context, token string) (*oidc.IDToken, error) {
+	subject, ok := m.subjects[token]
+	if !ok {
+		return nil, errors.New("unknown token")
+	}
+	return &oidc.IDToken{Subject: subject}, nil
+}
+
+// The oidc verifier is built once per server and shared by every control
+// session, so the set of subjects that logged in is global. A ping that
+// carries the token of a subject that logged in on another session is
+// accepted.
+//
+// This is not an authorization or identity-isolation problem: the identity
+// and the privileges of a session are fixed by its login message and are
+// never derived from the subject set again. The subject set only decides
+// whether a message that carries a token is accepted, and a token that
+// verifies against the issuer and has a subject that logged in on this
+// server is a credential of that subject, whoever presents it.
+func TestPingWithTheSubjectOfAnotherSessionIsAccepted(t *testing.T) {
+	r := require.New(t)
+
+	verifier := &subjectTokenVerifier{subjects: map[string]string{
+		"token-alice": "alice",
+		"token-bob":   "bob",
+	}}
+	consumer := auth.NewOidcAuthVerifier(
+		[]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, verifier)
+
+	// Another session of this server logs in as bob.
+	r.NoError(consumer.VerifyLogin(&msg.Login{PrivilegeKey: "token-bob"}))
+
+	// The session that logged in as alice accepts a ping that carries bob's
+	// token, because the check is against the set of all subjects that
+	// logged in on this server.
+	r.NoError(consumer.VerifyPing(&msg.Ping{
+		PrivilegeKey: "token-bob",
+		Timestamp:    time.Now().UnixMilli(),
+	}))
+	r.NoError(consumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-bob"}))
+
+	// A subject that never logged in on this server is still rejected.
+	r.Error(consumer.VerifyPing(&msg.Ping{
+		PrivilegeKey: "token-mallory",
+		Timestamp:    time.Now().UnixMilli(),
+	}))
+	r.Error(consumer.VerifyNewWorkConn(&msg.NewWorkConn{PrivilegeKey: "token-mallory"}))
 }

@@ -22,6 +22,18 @@ func StripUserPrefix(user, name string) string {
 	return name
 }
 
+// MaxDatagramIdentifierLength is the maximum number of bytes of a
+// wire-level proxy name that fit in the identifier field of a QUIC datagram
+// frame. The field holds a single length byte, so a longer wire-level name
+// cannot be addressed by the datagram lane at all.
+const MaxDatagramIdentifierLength = 255
+
+// DatagramIdentifierFits reports whether a wire-level proxy name fits in
+// the identifier field of a QUIC datagram frame.
+func DatagramIdentifierFits(wireName string) bool {
+	return len(wireName) <= MaxDatagramIdentifierLength
+}
+
 // BuildTargetServerProxyName resolves visitor target proxy name for wire-level
 // protocol messages. serverUser overrides local user when set.
 func BuildTargetServerProxyName(localUser, serverUser, serverName string) string {
