@@ -140,6 +140,169 @@ func TestControlRunningReplacementFinishesInWorker(t *testing.T) {
 	require.Equal(t, uint64(newCtl.ID()), info.ControlID)
 }
 
+// A retired control must interrupt the work streams it still owns so that
+// in-flight user connections do not linger until their own timeouts.
+func TestControlRetirementInterruptsOwnedWorkConns(t *testing.T) {
+	manager := NewControlManager(registry.NewClientRegistry())
+	ctl, _ := newLifecycleTestControl(t, "retire", "client", newCountingServerMetrics())
+	mustAddAndActivate(t, manager, ctl)
+	require.True(t, ctl.Start())
+
+	first := newCloseRecordingConn(t)
+	second := newCloseRecordingConn(t)
+	require.NoError(t, manager.RegisterWorkConn(ctl, proxy.NewWorkConn(first.msgConn())))
+	require.NoError(t, manager.RegisterWorkConn(ctl, proxy.NewWorkConn(second.msgConn())))
+	require.Len(t, ctl.workConns, 2)
+
+	require.NoError(t, ctl.Close())
+
+	require.True(t, first.closed(), "first work connection was not interrupted")
+	require.True(t, second.closed(), "second work connection was not interrupted")
+	require.Empty(t, ctl.workConns)
+}
+
+// A control that is replaced by a newer generation must interrupt its own work
+// streams, but never the replacement's.
+func TestControlReplacementInterruptsOnlyItsOwnWorkConns(t *testing.T) {
+	manager := NewControlManager(registry.NewClientRegistry())
+	oldCtl, _ := newLifecycleTestControl(t, "same-run", "client", newCountingServerMetrics())
+	mustAddAndActivate(t, manager, oldCtl)
+	require.True(t, oldCtl.Start())
+
+	owned := newCloseRecordingConn(t)
+	require.NoError(t, manager.RegisterWorkConn(oldCtl, proxy.NewWorkConn(owned.msgConn())))
+	require.Len(t, oldCtl.workConns, 1)
+
+	newCtl, _ := newLifecycleTestControl(t, "same-run", "client", newCountingServerMetrics())
+	require.NoError(t, manager.Add(newCtl))
+	newCtl.WaitForHandoff()
+
+	require.True(t, owned.closed(), "replaced control did not interrupt its work connection")
+	require.Empty(t, oldCtl.workConns)
+}
+
+// The tracked work connections must not accumulate: a closed stream drops
+// itself from the owning control's tracking set.
+func TestControlStopsTrackingClosedWorkConn(t *testing.T) {
+	manager := NewControlManager(registry.NewClientRegistry())
+	ctl, _ := newLifecycleTestControl(t, "tracking", "client", newCountingServerMetrics())
+	mustAddAndActivate(t, manager, ctl)
+	require.True(t, ctl.Start())
+
+	conn := newCloseRecordingConn(t)
+	workConn := proxy.NewWorkConn(conn.msgConn())
+	require.NoError(t, manager.RegisterWorkConn(ctl, workConn))
+	require.Len(t, ctl.workConns, 1)
+
+	require.NoError(t, workConn.Close())
+	require.Empty(t, ctl.workConns)
+}
+
+// A work connection whose close blocks must not block the control shutdown:
+// the interruption expires the stream deadline first.
+func TestControlExpiresWorkConnectionBeforeCloseHandshake(t *testing.T) {
+	manager := NewControlManager(registry.NewClientRegistry())
+	ctl, _ := newLifecycleTestControl(t, "blocked-close", "client", newCountingServerMetrics())
+	mustAddAndActivate(t, manager, ctl)
+	require.True(t, ctl.Start())
+
+	server, peer := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
+	conn := &closeHandshakeConn{Conn: server}
+	require.NoError(t, manager.RegisterWorkConn(ctl, proxy.NewWorkConn(msg.NewConn(conn, msg.NewV1ReadWriter(conn)))))
+
+	done := make(chan struct{})
+	go func() { ctl.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_ = peer.Close()
+		<-done
+		t.Fatal("control shutdown blocked on a work connection close handshake")
+	}
+	waitForControlDone(t, ctl)
+}
+
+// Work transports must be closed in parallel: one slow close may not delay
+// the interruption of the others.
+func TestControlClosesWorkTransportsConcurrently(t *testing.T) {
+	manager := NewControlManager(registry.NewClientRegistry())
+	ctl, _ := newLifecycleTestControl(t, "parallel-close", "client", newCountingServerMetrics())
+	mustAddAndActivate(t, manager, ctl)
+	require.True(t, ctl.Start())
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	for range 2 {
+		server, peer := net.Pipe()
+		t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
+		conn := &waitingCloseConn{Conn: server, entered: entered, release: release}
+		require.NoError(t, manager.RegisterWorkConn(ctl, proxy.NewWorkConn(msg.NewConn(conn, msg.NewV1ReadWriter(conn)))))
+	}
+
+	done := make(chan struct{})
+	go func() { ctl.Close(); close(done) }()
+	defer func() { close(release); <-done }()
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("work connection close handshakes were serialized")
+		}
+	}
+}
+
+type closeHandshakeConn struct{ net.Conn }
+
+func (c *closeHandshakeConn) Close() error {
+	_, _ = c.Write([]byte("close handshake"))
+	return c.Conn.Close()
+}
+
+type waitingCloseConn struct {
+	net.Conn
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (c *waitingCloseConn) Close() error {
+	c.entered <- struct{}{}
+	<-c.release
+	return c.Conn.Close()
+}
+
+// closeRecordingConn reports whether the underlying connection was closed.
+type closeRecordingConn struct {
+	net.Conn
+	closedCh chan struct{}
+	once     sync.Once
+}
+
+func newCloseRecordingConn(t *testing.T) *closeRecordingConn {
+	t.Helper()
+	server, peer := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = peer.Close() })
+	return &closeRecordingConn{Conn: server, closedCh: make(chan struct{})}
+}
+
+func (c *closeRecordingConn) msgConn() *msg.Conn {
+	return msg.NewConn(c, msg.NewV1ReadWriter(c))
+}
+
+func (c *closeRecordingConn) Close() error {
+	c.once.Do(func() { close(c.closedCh) })
+	return c.Conn.Close()
+}
+
+func (c *closeRecordingConn) closed() bool {
+	select {
+	case <-c.closedCh:
+		return true
+	default:
+		return false
+	}
+}
+
 func TestControlClosePendingAndRunning(t *testing.T) {
 	t.Run("pending", func(t *testing.T) {
 		manager := NewControlManager(registry.NewClientRegistry())
