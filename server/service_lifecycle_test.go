@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -359,4 +360,75 @@ func TestServiceParentCancellationAndCloseShareCleanup(t *testing.T) {
 	waitForSignal(t, runDone, "Run cleanup to finish")
 	require.Equal(t, int64(1), listener.closes.Load(), "cleanup ran more than once")
 	assertLifecyclePorts(t, addresses, true)
+}
+
+// TestNewServiceReleasesMainListenerOnKCPFailure verifies that when KCP
+// listener creation fails, NewService releases the main TCP listener and the
+// muxer Serve goroutine instead of leaking them. The main listener must be
+// re-bindable after a failed construction.
+func TestNewServiceReleasesMainListenerOnKCPFailure(t *testing.T) {
+	// Reserve the main bind port, then release it so NewService can bind it.
+	mainLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	mainPort := mainLn.Addr().(*net.TCPAddr).Port
+	require.NoError(t, mainLn.Close())
+	// Reserve the KCP bind port so NewService fails at the KCP step. KCP
+	// binds a UDP socket, so hold a UDP listener on the same port.
+	kcpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer kcpConn.Close()
+	cfg := &v1.ServerConfig{
+		BindAddr:      "127.0.0.1",
+		BindPort:      mainPort,
+		ProxyBindAddr: "127.0.0.1",
+		KCPBindPort:   kcpConn.LocalAddr().(*net.UDPAddr).Port,
+	}
+	require.NoError(t, cfg.Complete())
+
+	svr, err := NewService(cfg)
+	if svr != nil {
+		defer svr.Close()
+	}
+	require.Error(t, err, "KCP bind on a held port should fail")
+	require.Nil(t, svr, "failed construction must not return a service")
+
+	// The main listener must have been released: binding the same address
+	// must succeed.
+	mainAddress := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindPort))
+	mainLn2, err := net.Listen("tcp", mainAddress)
+	require.NoError(t, err, "main listener was not released after KCP failure")
+	require.NoError(t, mainLn2.Close())
+}
+
+// TestNewServiceReleasesMainListenerOnQUICFailure verifies that when QUIC
+// listener creation fails, NewService releases the main TCP listener and the
+// muxer Serve goroutine instead of leaking them.
+func TestNewServiceReleasesMainListenerOnQUICFailure(t *testing.T) {
+	mainLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	mainPort := mainLn.Addr().(*net.TCPAddr).Port
+	require.NoError(t, mainLn.Close())
+	// QUIC owns the UDP socket directly, so hold a UDP listener on the port.
+	quicConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer quicConn.Close()
+	cfg := &v1.ServerConfig{
+		BindAddr:      "127.0.0.1",
+		BindPort:      mainPort,
+		ProxyBindAddr: "127.0.0.1",
+		QUICBindPort:  quicConn.LocalAddr().(*net.UDPAddr).Port,
+	}
+	require.NoError(t, cfg.Complete())
+
+	svr, err := NewService(cfg)
+	if svr != nil {
+		defer svr.Close()
+	}
+	require.Error(t, err, "QUIC bind on a held port should fail")
+	require.Nil(t, svr, "failed construction must not return a service")
+
+	mainAddress := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.BindPort))
+	mainLn2, err := net.Listen("tcp", mainAddress)
+	require.NoError(t, err, "main listener was not released after QUIC failure")
+	require.NoError(t, mainLn2.Close())
 }
