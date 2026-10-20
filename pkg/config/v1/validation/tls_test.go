@@ -67,7 +67,9 @@ func TestClientSystemCARequiresTLS(t *testing.T) {
 				require.NoError(t, cfg.Complete())
 				warnings, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
 				require.NoError(t, warnings, "useSystemCa must produce an error, not a warning")
-				if state.name == "disabled" && protocol != "wss" {
+				// wss and quic always run over TLS, so useSystemCa stays
+				// meaningful when transport.tls.enable is false.
+				if state.name == "disabled" && !cfg.Transport.UsesImplicitTLS() {
 					require.ErrorContains(t, err, "transport.tls.useSystemCa")
 					require.ErrorContains(t, err, "transport.tls.enable")
 				} else {
@@ -79,10 +81,21 @@ func TestClientSystemCARequiresTLS(t *testing.T) {
 }
 
 func TestDisabledTLSFileWarnings(t *testing.T) {
-	for _, protocol := range []string{"tcp", "kcp", "quic", "websocket", "wss"} {
-		t.Run(protocol, func(t *testing.T) {
+	for _, test := range []struct {
+		protocol       string
+		expectWarnings bool
+	}{
+		{protocol: "tcp", expectWarnings: true},
+		{protocol: "kcp", expectWarnings: true},
+		{protocol: "websocket", expectWarnings: true},
+		// wss and quic always run over TLS, so their material is honored
+		// even when transport.tls.enable is false.
+		{protocol: "wss", expectWarnings: false},
+		{protocol: "quic", expectWarnings: false},
+	} {
+		t.Run(test.protocol, func(t *testing.T) {
 			cfg := &v1.ClientCommonConfig{}
-			cfg.Transport.Protocol = protocol
+			cfg.Transport.Protocol = test.protocol
 			cfg.Transport.TLS.Enable = new(false)
 			cfg.Transport.TLS.CertFile = "client.pem"
 			cfg.Transport.TLS.KeyFile = "client.key"
@@ -90,8 +103,16 @@ func TestDisabledTLSFileWarnings(t *testing.T) {
 			require.NoError(t, cfg.Complete())
 			warnings, err := NewConfigValidator(nil).ValidateClientCommonConfig(cfg)
 			require.NoError(t, err)
+			messages := ""
+			if warnings != nil {
+				messages = warnings.Error()
+			}
 			for _, field := range []string{"certFile", "keyFile", "trustedCaFile"} {
-				require.ErrorContains(t, warnings, "transport.tls."+field+" is invalid when transport.tls.enable is false")
+				if test.expectWarnings {
+					require.ErrorContains(t, warnings, "transport.tls."+field+" is invalid when transport.tls.enable is false")
+				} else {
+					require.NotContains(t, messages, "transport.tls."+field)
+				}
 			}
 		})
 	}

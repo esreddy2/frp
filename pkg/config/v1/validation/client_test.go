@@ -39,6 +39,34 @@ func validateClientFeatureGates(t *testing.T, gates map[string]bool, virtualNetA
 	return err
 }
 
+func TestValidateTransportUseSystemCaRequiresEnabledTLS(t *testing.T) {
+	// wss and quic always run over TLS, so the system roots are used there
+	// even when transport.tls.enable is false. The other protocols ignore
+	// useSystemCa while TLS is off, so it stays an error instead of silently
+	// dropping the verification the user asked for.
+	disabled := false
+	for _, protocol := range []string{"wss", "quic"} {
+		cfg := &v1.ClientTransportConfig{Protocol: protocol}
+		cfg.TLS.Enable = &disabled
+		cfg.TLS.UseSystemCa = true
+		cfg.Complete()
+
+		warning, err := validateTransportConfig(cfg)
+		require.NoError(t, err)
+		require.NoError(t, warning)
+	}
+
+	for _, protocol := range []string{"tcp", "kcp", "websocket"} {
+		cfg := &v1.ClientTransportConfig{Protocol: protocol}
+		cfg.TLS.Enable = &disabled
+		cfg.TLS.UseSystemCa = true
+		cfg.Complete()
+
+		_, err := validateTransportConfig(cfg)
+		require.ErrorContains(t, err, "transport.tls.useSystemCa requires transport.tls.enable to be true")
+	}
+}
+
 func TestValidateClientFeatureGates(t *testing.T) {
 	tests := []struct {
 		name              string

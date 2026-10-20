@@ -123,9 +123,11 @@ type ClientCommonConf struct {
 	// is "tcp".
 	Protocol string `ini:"protocol" json:"protocol"`
 	// QUIC protocol options
-	QUICKeepalivePeriod    int `ini:"quic_keepalive_period" json:"quic_keepalive_period"`
-	QUICMaxIdleTimeout     int `ini:"quic_max_idle_timeout" json:"quic_max_idle_timeout"`
-	QUICMaxIncomingStreams int `ini:"quic_max_incoming_streams" json:"quic_max_incoming_streams"`
+	QUICKeepalivePeriod    int  `ini:"quic_keepalive_period" json:"quic_keepalive_period"`
+	QUICMaxIdleTimeout     int  `ini:"quic_max_idle_timeout" json:"quic_max_idle_timeout"`
+	QUICMaxIncomingStreams int  `ini:"quic_max_incoming_streams" json:"quic_max_incoming_streams"`
+	QUICEnableDatagrams    bool `ini:"quic_enable_datagrams" json:"quic_enable_datagrams"`
+	QUICEnable0RTT         bool `ini:"quic_enable_0rtt" json:"quic_enable_0rtt"`
 	// TLSEnable specifies whether or not TLS should be used when communicating
 	// with the server. If "tls_cert_file" and "tls_key_file" are valid,
 	// client will load the supplied tls configuration.
@@ -366,7 +368,9 @@ func (cfg *ClientCommonConf) Validate() error {
 		}
 	}
 
-	if !cfg.TLSEnable {
+	// The wss and quic transports always run over TLS, so their material is
+	// applied even while tls_enable is false and is not reported here.
+	if !cfg.TLSEnable && !isImplicitTLSProtocol(cfg.Protocol) {
 		if cfg.TLSCertFile != "" {
 			fmt.Println("WARNING! tls_cert_file is invalid when tls_enable is false")
 		}
@@ -394,4 +398,12 @@ func (cfg *ClientCommonConf) Validate() error {
 		}
 	}
 	return nil
+}
+
+// isImplicitTLSProtocol reports whether the protocol always runs over TLS.
+// The wss transport wraps the connection in TLS and the quic transport
+// requires TLS as part of the protocol, so their material is applied even
+// while tls_enable is false.
+func isImplicitTLSProtocol(protocol string) bool {
+	return protocol == "wss" || protocol == "quic"
 }

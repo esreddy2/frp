@@ -40,6 +40,7 @@ func (v *ConfigValidator) ValidateClientCommonConfig(c *v1.ClientCommonConfig) (
 		func() (Warning, error) { return nil, validateWebServerConfig(&c.WebServer) },
 		func() (Warning, error) { return nil, validateMetricsServerConfig(&c.MetricsServer, &c.WebServer) },
 		func() (Warning, error) { return validateTransportConfig(&c.Transport) },
+		func() (Warning, error) { return validateWireProtocolV2Security(c) },
 		func() (Warning, error) { return validateIncludeFiles(c.IncludeConfigFiles) },
 	}
 
@@ -153,7 +154,9 @@ func validateTransportConfig(c *v1.ClientTransportConfig) (Warning, error) {
 		}
 	}
 
-	if !lo.FromPtr(c.TLS.Enable) {
+	// The wss and quic transports always run over TLS, so their material stays
+	// meaningful when transport.tls.enable is false and is not reported here.
+	if !lo.FromPtr(c.TLS.Enable) && !c.UsesImplicitTLS() {
 		checkTLSConfig := func(name string, value string) Warning {
 			if value != "" {
 				return fmt.Errorf("%s is invalid when transport.tls.enable is false", name)
@@ -164,9 +167,11 @@ func validateTransportConfig(c *v1.ClientTransportConfig) (Warning, error) {
 		warnings = AppendError(warnings, checkTLSConfig("transport.tls.certFile", c.TLS.CertFile))
 		warnings = AppendError(warnings, checkTLSConfig("transport.tls.keyFile", c.TLS.KeyFile))
 		warnings = AppendError(warnings, checkTLSConfig("transport.tls.trustedCaFile", c.TLS.TrustedCaFile))
-		// wss keeps TLS on regardless of transport.tls.enable.
-		if c.TLS.UseSystemCa && c.Protocol != "wss" {
-			errs = AppendError(errs, fmt.Errorf("transport.tls.useSystemCa requires transport.tls.enable to be true unless transport.protocol is wss"))
+		if c.TLS.UseSystemCa {
+			errs = AppendError(errs, fmt.Errorf(
+				"transport.tls.useSystemCa requires transport.tls.enable to be true unless transport.protocol is wss or quic "+
+					"(either set transport.tls.enable = true or remove transport.tls.useSystemCa)",
+			))
 		}
 	}
 
@@ -194,6 +199,17 @@ func validateIncludeFiles(files []string) (Warning, error) {
 	return nil, errs
 }
 
+func validateWireProtocolV2Security(c *v1.ClientCommonConfig) (Warning, error) {
+	if c.Transport.WireProtocol == "v2" && !c.Transport.RequireKeyShare {
+		if !lo.FromPtr(c.Transport.TLS.Enable) && !c.Transport.UsesImplicitTLS() && c.Auth.Method != v1.AuthMethodToken {
+			return fmt.Errorf("transport.wireProtocol is 'v2' over unencrypted transport (%s) without token auth and without transport.requireKeyShare; "+
+				"connections may be vulnerable to passive eavesdropping if peer does not exchange an X25519 key share (set transport.requireKeyShare = true or enable TLS)",
+				c.Transport.Protocol), nil
+		}
+	}
+	return nil, nil
+}
+
 func ValidateAllClientConfig(
 	c *v1.ClientCommonConfig,
 	proxyCfgs []v1.ProxyConfigurer,
@@ -210,8 +226,14 @@ func ValidateAllClientConfig(
 		}
 	}
 
+	// The user of the client is part of the wire-level name of a proxy, so
+	// the proxy rules are checked against it.
+	var user string
+	if c != nil {
+		user = c.User
+	}
 	for _, c := range proxyCfgs {
-		if err := ValidateProxyConfigurerForClient(c); err != nil {
+		if err := ValidateProxyConfigurerForClient(c, user); err != nil {
 			return warnings, fmt.Errorf("proxy %s: %v", c.GetBaseConfig().Name, err)
 		}
 	}
