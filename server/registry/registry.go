@@ -42,10 +42,12 @@ type ClientInfo struct {
 // ClientRegistry keeps track of active clients keyed by "{user}.{clientID}" (runID fallback when raw clientID is empty).
 // Entries without an explicit raw clientID are removed on disconnect to avoid stale offline records.
 type ClientRegistry struct {
-	mu       sync.RWMutex
-	clients  map[string]*ClientInfo
-	runIndex map[string]string
-	clock    clock.PassiveClock
+	mu        sync.RWMutex
+	clients   map[string]*ClientInfo
+	runIndex  map[string]string
+	clock     clock.PassiveClock
+	closeOnce sync.Once
+	stopCh    chan struct{}
 }
 
 func NewClientRegistry() *ClientRegistry {
@@ -56,11 +58,14 @@ func newClientRegistryWithClock(clk clock.PassiveClock) *ClientRegistry {
 	if clk == nil {
 		clk = clock.RealClock{}
 	}
-	return &ClientRegistry{
+	cr := &ClientRegistry{
 		clients:  make(map[string]*ClientInfo),
 		runIndex: make(map[string]string),
 		clock:    clk,
+		stopCh:   make(chan struct{}),
 	}
+	go cr.cleanupWorker()
+	return cr
 }
 
 // Register stores/updates metadata for a client and returns the registry key plus whether it conflicts with an online client.
@@ -213,4 +218,38 @@ func (cr *ClientRegistry) composeClientKey(user, id string) string {
 	default:
 		return fmt.Sprintf("%s.%s", user, id)
 	}
+}
+
+// cleanupWorker periodically removes offline entries with non-empty RawClientID
+// that have been disconnected for more than 24 hours.
+func (cr *ClientRegistry) cleanupWorker() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			cr.cleanupOfflineEntries()
+		case <-cr.stopCh:
+			return
+		}
+	}
+}
+
+func (cr *ClientRegistry) cleanupOfflineEntries() {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	for key, info := range cr.clients {
+		if info.RawClientID != "" && !info.Online && !info.DisconnectedAt.IsZero() {
+			if cr.clock.Since(info.DisconnectedAt) > 24*time.Hour {
+				delete(cr.clients, key)
+			}
+		}
+	}
+}
+
+// Close stops the cleanup worker.
+func (cr *ClientRegistry) Close() {
+	cr.closeOnce.Do(func() {
+		close(cr.stopCh)
+	})
 }

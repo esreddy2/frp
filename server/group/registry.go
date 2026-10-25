@@ -8,7 +8,7 @@ import (
 // automatic creation on first access.
 type groupRegistry[G any] struct {
 	groups map[string]G
-	mu     sync.Mutex
+	mu     sync.RWMutex
 }
 
 func newGroupRegistry[G any]() groupRegistry[G] {
@@ -29,8 +29,8 @@ func (r *groupRegistry[G]) getOrCreate(key string, newFn func() G) G {
 }
 
 func (r *groupRegistry[G]) get(key string) (G, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	g, ok := r.groups[key]
 	return g, ok
 }
@@ -38,8 +38,8 @@ func (r *groupRegistry[G]) get(key string) (G, bool) {
 // isCurrent returns true if key exists in the registry and matchFn
 // returns true for the stored value.
 func (r *groupRegistry[G]) isCurrent(key string, matchFn func(G) bool) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	g, ok := r.groups[key]
 	return ok && matchFn(g)
 }

@@ -70,5 +70,11 @@ func (rc *ResourceController) Close() error {
 	if rc.TCPMuxHTTPConnectMuxer != nil {
 		rc.TCPMuxHTTPConnectMuxer.Close()
 	}
+	if rc.TCPPortManager != nil {
+		rc.TCPPortManager.Close()
+	}
+	if rc.UDPPortManager != nil {
+		rc.UDPPortManager.Close()
+	}
 	return nil
 }
