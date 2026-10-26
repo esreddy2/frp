@@ -93,6 +93,29 @@ func NewConnector(ctx context.Context, cfg *v1.ClientCommonConfig) Connector {
 	}
 }
 
+// clientTLSConfig builds the TLS configuration used to reach frps.
+//
+// It returns nil when the transport does not use TLS at all. The wss and quic
+// transports always run over TLS, so their material is honored even when
+// transport.tls.enable is false.
+func (c *defaultConnectorImpl) clientTLSConfig() (*tls.Config, error) {
+	tlsCfg := c.cfg.Transport.TLS
+	if !lo.FromPtr(tlsCfg.Enable) && !c.cfg.Transport.UsesImplicitTLS() {
+		return nil, nil
+	}
+
+	sn := tlsCfg.ServerName
+	if sn == "" {
+		sn = c.cfg.ServerAddr
+	}
+	return transport.NewClientTLSConfigWithSystemCA(
+		tlsCfg.CertFile,
+		tlsCfg.KeyFile,
+		tlsCfg.TrustedCaFile,
+		sn,
+		tlsCfg.UseSystemCa)
+}
+
 // Open opens an underlying connection to the server.
 // The underlying connection is either a TCP connection or a QUIC connection.
 // After the underlying connection is established, you can call Connect() to get a stream.
@@ -102,36 +125,44 @@ func (c *defaultConnectorImpl) Open() error {
 
 	// special for quic
 	if strings.EqualFold(c.cfg.Transport.Protocol, "quic") {
-		var tlsConfig *tls.Config
-		var err error
-		sn := c.cfg.Transport.TLS.ServerName
-		if sn == "" {
-			sn = c.cfg.ServerAddr
-		}
-		if lo.FromPtr(c.cfg.Transport.TLS.Enable) {
-			tlsConfig, err = transport.NewClientTLSConfigWithSystemCA(
-				c.cfg.Transport.TLS.CertFile,
-				c.cfg.Transport.TLS.KeyFile,
-				c.cfg.Transport.TLS.TrustedCaFile,
-				sn,
-				c.cfg.Transport.TLS.UseSystemCa)
-		} else {
-			tlsConfig, err = transport.NewClientTLSConfig("", "", "", sn)
-		}
+		tlsConfig, err := c.clientTLSConfig()
 		if err != nil {
 			xl.Warnf("fail to build tls configuration, err: %v", err)
 			return err
 		}
+		if tlsConfig == nil {
+			// QUIC always runs over TLS.
+			sn := c.cfg.Transport.TLS.ServerName
+			if sn == "" {
+				sn = c.cfg.ServerAddr
+			}
+			tlsConfig, err = transport.NewClientTLSConfig("", "", "", sn)
+			if err != nil {
+				xl.Warnf("fail to build tls configuration, err: %v", err)
+				return err
+			}
+		}
 		tlsConfig.NextProtos = []string{"frp"}
 
+		quicConfig := &quic.Config{
+			MaxIdleTimeout:     time.Duration(c.cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
+			MaxIncomingStreams: int64(c.cfg.Transport.QUIC.MaxIncomingStreams),
+			KeepAlivePeriod:    time.Duration(c.cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+			EnableDatagrams:    lo.FromPtr(c.cfg.Transport.QUIC.EnableDatagrams),
+		}
+		if lo.FromPtr(c.cfg.Transport.QUIC.Enable0RTT) {
+			// frp does not use QUIC 0-RTT. The option only enables the
+			// address validation token cache, which lets the server skip
+			// the address validation Retry on a reconnect. The connection
+			// is opened with quic.DialAddr, never with quic.DialAddrEarly:
+			// the first message frp sends on a QUIC connection carries the
+			// client's credential, and 0-RTT early data is replayable.
+			quicConfig.TokenStore = quic.NewLRUTokenStore(100, 10)
+		}
 		conn, err := quic.DialAddr(
 			c.ctx,
 			net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort)),
-			tlsConfig, &quic.Config{
-				MaxIdleTimeout:     time.Duration(c.cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
-				MaxIncomingStreams: int64(c.cfg.Transport.QUIC.MaxIncomingStreams),
-				KeepAlivePeriod:    time.Duration(c.cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
-			})
+			tlsConfig, quicConfig)
 		if err != nil {
 			return err
 		}
@@ -183,28 +214,10 @@ func (c *defaultConnectorImpl) Connect() (net.Conn, error) {
 
 func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 	xl := xlog.FromContextSafe(c.ctx)
-	var tlsConfig *tls.Config
-	var err error
-	tlsEnable := lo.FromPtr(c.cfg.Transport.TLS.Enable)
-	if c.cfg.Transport.Protocol == "wss" {
-		tlsEnable = true
-	}
-	if tlsEnable {
-		sn := c.cfg.Transport.TLS.ServerName
-		if sn == "" {
-			sn = c.cfg.ServerAddr
-		}
-
-		tlsConfig, err = transport.NewClientTLSConfigWithSystemCA(
-			c.cfg.Transport.TLS.CertFile,
-			c.cfg.Transport.TLS.KeyFile,
-			c.cfg.Transport.TLS.TrustedCaFile,
-			sn,
-			c.cfg.Transport.TLS.UseSystemCa)
-		if err != nil {
-			xl.Warnf("fail to build tls configuration, err: %v", err)
-			return nil, err
-		}
+	tlsConfig, err := c.clientTLSConfig()
+	if err != nil {
+		xl.Warnf("fail to build tls configuration, err: %v", err)
+		return nil, err
 	}
 
 	proxyType, addr, auth, err := libnet.ParseProxyURL(c.cfg.Transport.ProxyURL)
@@ -249,6 +262,11 @@ func (c *defaultConnectorImpl) realConnect() (net.Conn, error) {
 		net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort)),
 		dialOptions...,
 	)
+	if err == nil {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetNoDelay(true)
+		}
+	}
 	return conn, err
 }
 

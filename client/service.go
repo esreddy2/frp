@@ -67,6 +67,28 @@ func (e cancelErr) Error() string {
 type ServiceOptions struct {
 	Common *v1.ClientCommonConfig
 
+	// InitialRunID is sent in the first login request. When empty, frps
+	// assigns a RunID as usual. After a successful login, the RunID returned
+	// by frps is used for subsequent reconnects.
+	InitialRunID string
+
+	// OnFirstLoginSuccess is called synchronously with the RunID returned after
+	// frps has accepted and authenticated a Login, before the corresponding
+	// control is created or starts proxy and visitor registration. It runs at
+	// most once in this Service lifetime; a later internal reconnect cannot act
+	// on state created after the first accepted Login. Returning an error rejects
+	// the authenticated session, closes it, and terminates the Service without
+	// installing a control. The RunID is passed through verbatim, so a caller
+	// that correlates it with external state must validate it before applying
+	// side effects. Cancellation observed immediately after Login acceptance
+	// skips the hook; cancellation concurrent with hook dispatch may still allow
+	// that one synchronous call. The caller owns callback execution: it must
+	// return promptly, and a panic propagates like other ServiceOptions callbacks.
+	// The returned Service error wraps the callback error for errors.Is/errors.As,
+	// but uses a fixed message so callback details cannot create unbounded log
+	// output.
+	OnFirstLoginSuccess func(runID string) error
+
 	// ConfigSourceAggregator manages internal config and optional store sources.
 	// It is required for creating a Service.
 	ConfigSourceAggregator *source.Aggregator
@@ -163,6 +185,15 @@ type Service struct {
 
 	connectorCreator func(context.Context, *v1.ClientCommonConfig) Connector
 	handleWorkConnCb func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) bool
+
+	onFirstLoginSuccess func(string) error
+	// firstLoginSuccessOnce guards the hook so it runs at most once per Service
+	// lifetime, no matter how often the client reconnects.
+	firstLoginSuccessOnce sync.Once
+	// firstLoginSuccessError is written only by the synchronous first-login
+	// path before the reconnect goroutine starts; later reconnects read it
+	// after sync.Once.Do returns.
+	firstLoginSuccessError error
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -231,8 +262,11 @@ func NewService(options ServiceOptions) (*Service, error) {
 		aggregator:       options.ConfigSourceAggregator,
 		configSource:     configSource,
 		storeSource:      storeSource,
+		runID:            options.InitialRunID,
 		connectorCreator: options.ConnectorCreator,
 		handleWorkConnCb: options.HandleWorkConnCb,
+
+		onFirstLoginSuccess: options.OnFirstLoginSuccess,
 	}
 
 	if webServer != nil {
@@ -309,8 +343,23 @@ func (svr *Service) Run(ctx context.Context) error {
 	// first login to frps
 	svr.loopLoginUntilSuccess(10*time.Second, lo.FromPtr(svr.common.LoginFailExit))
 	if svr.ctl == nil {
+		// A rejected first-login hook is reported with its own error so the
+		// caller can match it with errors.Is/errors.As.
+		if svr.firstLoginSuccessError != nil {
+			return svr.firstLoginSuccessError
+		}
+		svr.lifecycleMu.Lock()
+		closed := svr.closed
+		svr.lifecycleMu.Unlock()
+		if closed {
+			// The owner asked the service to stop, so the missing control is
+			// the expected outcome and not a login failure.
+			return nil
+		}
 		cancelCause := cancelErr{}
-		_ = errors.As(context.Cause(svr.ctx), &cancelCause)
+		if !errors.As(context.Cause(svr.ctx), &cancelCause) {
+			return fmt.Errorf("login to the server failed: %w", context.Cause(svr.ctx))
+		}
 		return fmt.Errorf("login to the server failed: %v. With loginFailExit enabled, no additional retries will be attempted", cancelCause.Err)
 	}
 
@@ -377,21 +426,40 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 		}
 		sessionCtx, err := dialer.Dial(svr.runID)
 		if err != nil {
-			xl.Warnf("connect to server error: %v", err)
-			if firstLoginExit {
-				svr.cancel(cancelErr{Err: err})
+			errOutput := err
+			if !lo.FromPtr(svr.common.Transport.TLS.Enable) && !svr.common.Transport.UsesImplicitTLS() {
+				errOutput = fmt.Errorf(
+					"%w (transport.tls.enable is false; if server enforces TLS via transport.tls.force = true, set transport.tls.enable = true in frpc.toml)",
+					err,
+				)
 			}
-			return false, err
+			xl.Warnf("connect to server error: %v", errOutput)
+			if firstLoginExit {
+				svr.cancel(cancelErr{Err: errOutput})
+			}
+			return false, errOutput
+		}
+		// The service may have been closed while the login was in flight. Drop
+		// the accepted session instead of installing a control for a service
+		// that is already shutting down.
+		if svr.ctx.Err() != nil {
+			closeSessionContext(sessionCtx)
+			return false, context.Cause(svr.ctx)
 		}
 
 		svr.runID = sessionCtx.RunID
 		xl.AddPrefix(xlog.LogPrefix{Name: "runID", Value: svr.runID})
 		xl.Infof("login to server success, get run id [%s]", svr.runID)
+		if err := svr.runFirstLoginSuccessHook(); err != nil {
+			closeSessionContext(sessionCtx)
+			svr.cancel(cancelErr{Err: err})
+			xl.Errorf("accepted login rejected: %v", err)
+			return false, err
+		}
 
 		ctl, err := NewControl(svr.ctx, sessionCtx)
 		if err != nil {
-			sessionCtx.Conn.Close()
-			sessionCtx.Connector.Close()
+			closeSessionContext(sessionCtx)
 			xl.Errorf("new control error: %v", err)
 			return false, err
 		}
@@ -425,6 +493,42 @@ func (svr *Service) loopLoginUntilSuccess(maxInterval time.Duration, firstLoginE
 			Jitter:      0.1,
 			MaxDuration: maxInterval,
 		}), true, svr.ctx.Done())
+}
+
+// firstLoginSuccessHookError reports that the first-login hook rejected an
+// authenticated session. The cause is preserved for errors.Is/errors.As, but
+// the message is fixed so a callback error cannot create unbounded log output.
+type firstLoginSuccessHookError struct {
+	cause error
+}
+
+func (e *firstLoginSuccessHookError) Error() string {
+	return "first login success hook rejected authenticated session"
+}
+
+func (e *firstLoginSuccessHookError) Unwrap() error {
+	return e.cause
+}
+
+// runFirstLoginSuccessHook invokes the first-login hook at most once per
+// Service lifetime and returns the recorded rejection, if any.
+func (svr *Service) runFirstLoginSuccessHook() error {
+	if svr.onFirstLoginSuccess == nil {
+		return nil
+	}
+	svr.firstLoginSuccessOnce.Do(func() {
+		if err := svr.onFirstLoginSuccess(svr.runID); err != nil {
+			svr.firstLoginSuccessError = &firstLoginSuccessHookError{cause: err}
+		}
+	})
+	return svr.firstLoginSuccessError
+}
+
+// closeSessionContext releases the resources of an accepted but unused
+// control session.
+func closeSessionContext(sessionCtx *SessionContext) {
+	_ = sessionCtx.Conn.Close()
+	_ = sessionCtx.Connector.Close()
 }
 
 func (svr *Service) UpdateAllConfigurer(proxyCfgs []v1.ProxyConfigurer, visitorCfgs []v1.VisitorConfigurer) error {

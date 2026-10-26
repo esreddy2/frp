@@ -93,6 +93,13 @@ type Service struct {
 	// Accept connections using quic
 	quicListener *quic.Listener
 
+	// quicTransport and quicConn own the QUIC listener's UDP socket.
+	// quic.ListenAddr hides the transport, and its listener closes the
+	// socket from a background goroutine, so the port is not free when
+	// Close returns. Owning the socket here releases it synchronously.
+	quicTransport *quic.Transport
+	quicConn      *net.UDPConn
+
 	// Accept connections using websocket
 	websocketListener net.Listener
 
@@ -145,7 +152,7 @@ type Service struct {
 	closeOnce   sync.Once
 }
 
-func NewService(cfg *v1.ServerConfig) (*Service, error) {
+func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 	tlsConfig, err := transport.NewServerTLSConfig(
 		cfg.Transport.TLS.CertFile,
 		cfg.Transport.TLS.KeyFile,
@@ -160,7 +167,7 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 	}
 
 	clientRegistry := registry.NewClientRegistry()
-	svr := &Service{
+	svr = &Service{
 		ctlManager:     NewControlManager(clientRegistry),
 		clientRegistry: clientRegistry,
 		pxyManager:     proxy.NewManager(),
@@ -175,6 +182,21 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		cfg:               cfg,
 		ctx:               context.Background(),
 	}
+
+	// Roll back every resource acquired below if any later step fails.
+	// The web and metrics servers already roll back on their own failure
+	// paths; this covers the main listener, muxer goroutine, KCP listener,
+	// QUIC transport/socket, SSH gateway, and vhost listeners created earlier
+	// in this function, none of which are released by a bare return.
+	//
+	// svrRef captures svr before any return path sets the named return to nil,
+	// so the defer can still close the service on failure.
+	svrRef := svr
+	defer func() {
+		if err != nil && svrRef != nil {
+			_ = svrRef.Close()
+		}
+	}()
 
 	// Create tcpmux httpconnect multiplexer.
 	if cfg.TCPMuxHTTPConnectPort > 0 {
@@ -230,8 +252,11 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 
 	svr.muxer = mux.NewMux(ln)
 	svr.muxer.SetKeepAlive(time.Duration(cfg.Transport.TCPKeepAlive) * time.Second)
+	// Capture muxer by value so the Serve goroutine does not read through
+	// the svr named return, which is written (set to nil) on error returns.
+	muxer := svr.muxer
 	go func() {
-		_ = svr.muxer.Serve()
+		_ = muxer.Serve()
 	}()
 	ln = svr.muxer.DefaultListener()
 
@@ -243,6 +268,10 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.KCPBindPort))
 		svr.kcpListener, err = netpkg.ListenKcp(address)
 		if err != nil {
+			// ListenKcp returns a typed nil *KCPListener on failure; clear it so
+			// closeResources (invoked by the rollback defer) does not panic on
+			// a typed-nil interface.
+			svr.kcpListener = nil
 			return nil, fmt.Errorf("listen on kcp udp address %s error: %v", address, err)
 		}
 		log.Infof("frps kcp listen on udp %s", address)
@@ -252,12 +281,44 @@ func NewService(cfg *v1.ServerConfig) (*Service, error) {
 		address := net.JoinHostPort(cfg.BindAddr, strconv.Itoa(cfg.QUICBindPort))
 		quicTLSCfg := tlsConfig.Clone()
 		quicTLSCfg.NextProtos = []string{"frp"}
-		svr.quicListener, err = quic.ListenAddr(address, quicTLSCfg, &quic.Config{
+		// QUIC 0-RTT is built on TLS session tickets, so disabling them keeps 0-RTT
+		// unreachable without penalizing other external TLS/HTTPS/WSS services.
+		quicTLSCfg.SessionTicketsDisabled = true
+		// Own the UDP socket instead of using quic.ListenAddr: quic-go
+		// closes a listener's socket from a background goroutine, so the
+		// port would still be bound when this function returns an error
+		// and the caller releases the other listeners.
+		udpAddr, addrErr := net.ResolveUDPAddr("udp", address)
+		if addrErr != nil {
+			return nil, fmt.Errorf("resolve quic udp address %s error: %v", address, addrErr)
+		}
+		udpConn, listenErr := net.ListenUDP("udp", udpAddr)
+		if listenErr != nil {
+			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, listenErr)
+		}
+		quicTransport := &quic.Transport{Conn: udpConn}
+		svr.quicTransport = quicTransport
+		svr.quicConn = udpConn
+		svr.quicListener, err = quicTransport.Listen(quicTLSCfg, &quic.Config{
 			MaxIdleTimeout:     time.Duration(cfg.Transport.QUIC.MaxIdleTimeout) * time.Second,
 			MaxIncomingStreams: int64(cfg.Transport.QUIC.MaxIncomingStreams),
 			KeepAlivePeriod:    time.Duration(cfg.Transport.QUIC.KeepalivePeriod) * time.Second,
+			EnableDatagrams:    lo.FromPtr(cfg.Transport.QUIC.EnableDatagrams),
+			// frp never accepts QUIC 0-RTT early data. Every message frp
+			// sends first on a QUIC connection carries the client's
+			// credential, and 0-RTT early data is replayable: an on-path
+			// attacker can capture the client's first flight and replay it
+			// to authenticate as that client. RFC 8446 section 8.1 puts the
+			// replay protection on the application, and frp's control
+			// protocol is not replay safe. Together with the disabled TLS
+			// session tickets in quicTLSCfg this keeps 0-RTT unreachable.
+			Allow0RTT: false,
 		})
 		if err != nil {
+			_ = quicTransport.Close()
+			_ = udpConn.Close()
+			svr.quicTransport = nil
+			svr.quicConn = nil
 			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
 		}
 		log.Infof("frps quic listen on %s", address)
@@ -400,6 +461,24 @@ func metricsCollectors(cfg *v1.ServerConfig) (mem bool, prometheus bool) {
 	return mem, prometheus
 }
 
+// CloseControl closes the exact currently indexed control for runID.
+//
+// The manager lookup captures a Control pointer. A same-runID replacement
+// installed after that lookup owns a different pointer and is never closed by
+// this call. CloseControl returns false when no control was indexed or the
+// captured control had already finished; callers may treat both outcomes as
+// idempotent terminal cleanup. A request queued before this method is invoked
+// deliberately closes the control current at invocation time: one runID is one
+// immutable outer authorization cycle, so a same-runID reconnect remains part
+// of the stale cycle.
+func (svr *Service) CloseControl(runID string) bool {
+	ctl, ok := svr.ctlManager.GetByID(runID)
+	if !ok {
+		return false
+	}
+	return ctl.closeIfActive()
+}
+
 func (svr *Service) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	svr.lifecycleMu.Lock()
@@ -490,6 +569,15 @@ func (svr *Service) closeResources() {
 	if svr.quicListener != nil {
 		svr.quicListener.Close()
 	}
+	// Stop the transport before closing the socket: Transport.Close waits
+	// for the read loop to return, so the port is free as soon as the
+	// socket is closed below.
+	if svr.quicTransport != nil {
+		svr.quicTransport.Close()
+	}
+	if svr.quicConn != nil {
+		svr.quicConn.Close()
+	}
 	if svr.websocketListener != nil {
 		svr.websocketListener.Close()
 	}
@@ -517,8 +605,43 @@ func (svr *Service) closeResources() {
 		svr.sshTunnelGateway.Close()
 	}
 	svr.rc.Close()
-	svr.muxer.Close()
+	if svr.muxer != nil {
+		svr.muxer.Close()
+	}
+	if svr.clientRegistry != nil {
+		svr.clientRegistry.Close()
+	}
+
+	// Close the controls and wait, within a bounded budget, for their workers
+	// to publish the proxy teardown notifications. The plugin notification
+	// pipeline is stopped only afterwards so those notifications are still
+	// delivered during a graceful shutdown.
+	ctls := svr.ctlManager.Snapshot()
 	svr.ctlManager.Close()
+	waitControlsClosed(ctls, controlShutdownWaitTimeout)
+
+	svr.pluginManager.Close()
+}
+
+// controlShutdownWaitTimeout bounds how long a graceful shutdown waits for the
+// closing controls to publish their lifecycle notifications.
+const controlShutdownWaitTimeout = 2 * time.Second
+
+// waitControlsClosed waits until every control finished or the budget is
+// exhausted. It never blocks the shutdown beyond the budget.
+func waitControlsClosed(ctls []*Control, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	for _, ctl := range ctls {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		select {
+		case <-ctl.doneCh:
+		case <-time.After(remaining):
+			return
+		}
+	}
 }
 
 func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, internal bool) {
@@ -546,7 +669,7 @@ func (svr *Service) handleConnection(ctx context.Context, conn net.Conn, interna
 			controlConn := acceptedConn.conn
 			if !internal {
 				var controlRW io.ReadWriter
-				controlRW, err = acceptedConn.newControlReadWriter(conn, svr.auth.EncryptionKey())
+				controlRW, err = acceptedConn.newControlReadWriter(conn, svr.auth.EncryptionKey(), svr.cfg.Auth.Method, svr.cfg.Transport.RequireKeyShare)
 				if err == nil {
 					controlConn = acceptedConn.messageConnFor(controlRW)
 				}
@@ -685,14 +808,25 @@ func (ac *acceptedConnection) messageConnFor(rw io.ReadWriter) *msg.Conn {
 	return msg.NewConn(ac.conn, msg.NewReadWriter(rw, ac.wireProtocol))
 }
 
-func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte) (io.ReadWriter, error) {
+func (ac *acceptedConnection) newControlReadWriter(rw io.ReadWriter, key []byte, authMethod v1.AuthMethod, requireKeyShare bool) (io.ReadWriter, error) {
 	if ac.wireProtocol == wire.ProtocolV2 {
 		if ac.cryptoContext == nil {
 			return nil, fmt.Errorf("missing v2 crypto negotiation")
 		}
+		if len(ac.cryptoContext.SharedSecret) == 0 {
+			if requireKeyShare {
+				return nil, fmt.Errorf(
+					"client did not offer an X25519 key share and transport.requireKeyShare is set " +
+						"(upgrade frpc to support v2 key agreement, or set transport.requireKeyShare = false in frps.toml if operating over a trusted network)",
+				)
+			}
+			if authMethod != v1.AuthMethodToken {
+				log.Warnf("client did not offer an X25519 key share; the v2 control channel is not protected against passive observers, upgrade frpc")
+			}
+		}
 		return netpkg.NewAEADCryptoReadWriter(
 			rw,
-			key,
+			ac.cryptoContext.DeriveIKM(key),
 			netpkg.AEADCryptoRoleServer,
 			ac.cryptoContext.Algorithm,
 			ac.cryptoContext.TranscriptHash,
@@ -730,7 +864,7 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 		return fmt.Errorf("decode ClientHello: %w", err)
 	}
 
-	serverHello, err := wire.NewServerHello(hello)
+	serverHello, sharedSecret, err := wire.NewServerHello(hello)
 	if err != nil {
 		serverHello = wire.DefaultServerHello()
 		serverHello.Error = err.Error()
@@ -747,6 +881,7 @@ func (ac *acceptedConnection) handleClientHello(conn net.Conn, wireConn *wire.Co
 	}
 	cryptoContext := wire.NewCryptoContext(
 		serverHello.Selected.Crypto.Algorithm,
+		sharedSecret,
 		frame.Payload,
 		serverHelloFrame.Payload,
 	)
@@ -770,6 +905,9 @@ func (svr *Service) HandleListener(l net.Listener, internal bool) {
 		if err != nil {
 			log.Warnf("listener for incoming connections from client closed")
 			return
+		}
+		if tcpConn, ok := c.(*net.TCPConn); ok {
+			_ = tcpConn.SetNoDelay(true)
 		}
 		// inject xlog object into net.Conn context
 		xl := xlog.New()
