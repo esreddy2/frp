@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -240,6 +241,39 @@ func (conn *wrapQuicStream) RemoteAddr() net.Addr {
 func (conn *wrapQuicStream) Close() error {
 	conn.CancelRead(0)
 	return conn.Stream.Close()
+}
+
+func (conn *wrapQuicStream) GetQuicConn() *quic.Conn {
+	return conn.c
+}
+
+// GetQuicConnFromNetConn extracts the QUIC connection from a net.Conn if it wraps a QUIC stream.
+// It unwraps through common wrapper types: msg.Conn, ContextConn, WrapReadWriteCloserConn.
+func GetQuicConnFromNetConn(conn net.Conn) *quic.Conn {
+	for {
+		switch c := conn.(type) {
+		case *wrapQuicStream:
+			return c.GetQuicConn()
+		case *ContextConn:
+			conn = c.Conn
+		case *WrapReadWriteCloserConn:
+			conn = c.underConn
+		default:
+			// Try to unwrap via embedded net.Conn field (e.g., msg.Conn)
+			if v := reflect.ValueOf(conn); v.Kind() == reflect.Pointer {
+				elem := v.Elem()
+				if elem.Kind() == reflect.Struct {
+					if f := elem.FieldByName("Conn"); f.IsValid() && f.CanInterface() {
+						if next, ok := f.Interface().(net.Conn); ok && next != nil {
+							conn = next
+							continue
+						}
+					}
+				}
+			}
+			return nil
+		}
+	}
 }
 
 func NewCryptoReadWriter(rw io.ReadWriter, key []byte) (io.ReadWriter, error) {
