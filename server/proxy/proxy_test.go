@@ -17,7 +17,9 @@ package proxy
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -52,7 +54,76 @@ func TestWorkConnStartWritesStartWorkConn(t *testing.T) {
 
 	result := <-resultCh
 	require.NoError(t, result.err)
-	require.Same(t, serverMsgConn, result.conn)
+	// The started stream wraps the same underlying connection so that the
+	// owning control keeps observing the stream's lifetime.
+	stream, ok := result.conn.(*workConnStream)
+	require.True(t, ok)
+	require.Same(t, serverMsgConn, stream.Conn)
+}
+
+// Closing the started stream must close the owning work connection and run
+// its close callback exactly once, so that the control can stop tracking it.
+func TestWorkConnStartStreamCloseClosesOwnerAndFiresCallback(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverMsgConn := msg.NewConn(server, msg.NewV2ReadWriter(server))
+	clientMsgConn := msg.NewConn(client, msg.NewV2ReadWriter(client))
+	workConn := NewWorkConn(serverMsgConn)
+
+	var callbacks int
+	var callbackMu sync.Mutex
+	workConn.SetCloseCallback(func() {
+		callbackMu.Lock()
+		callbacks++
+		callbackMu.Unlock()
+	})
+
+	// Drain the start message so that the write inside Start can complete.
+	go func() {
+		_, _ = clientMsgConn.ReadMsg()
+	}()
+
+	conn, err := workConn.Start(&msg.StartWorkConn{ProxyName: "tcp"})
+	require.NoError(t, err)
+
+	require.NoError(t, conn.Close())
+	callbackMu.Lock()
+	require.Equal(t, 1, callbacks)
+	callbackMu.Unlock()
+
+	// The underlying connection is closed, so the stream is no longer usable.
+	_, err = conn.Read(make([]byte, 1))
+	require.Error(t, err)
+
+	// Repeated closes keep the callback count at one.
+	require.NoError(t, conn.Close())
+	callbackMu.Lock()
+	require.Equal(t, 1, callbacks)
+	callbackMu.Unlock()
+}
+
+// Interrupt must close the connection even when the transport close handshake
+// would otherwise block.
+func TestWorkConnInterruptClosesConnection(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverMsgConn := msg.NewConn(server, msg.NewV2ReadWriter(server))
+	workConn := NewWorkConn(serverMsgConn)
+
+	closed := make(chan struct{})
+	workConn.SetCloseCallback(func() { close(closed) })
+
+	require.NoError(t, workConn.Interrupt())
+
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("interrupt did not close the work connection")
+	}
 }
 
 func TestGetWorkConnFromPoolStartWorkConnUnchangedForUDPWireV2(t *testing.T) {

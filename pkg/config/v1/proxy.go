@@ -40,10 +40,23 @@ type ProxyTransport struct {
 	// client or server side. Valid values include "client" and "server".
 	// By default, this value is "client".
 	BandwidthLimitMode string `json:"bandwidthLimitMode,omitempty"`
-	// ProxyProtocolVersion specifies which protocol version to use. Valid
-	// values include "v1", "v2", and "". If the value is "", a protocol
-	// version will be automatically selected. By default, this value is "".
+	// ProxyProtocol specifies the protocol to convey the original client address
+	// to the local service. Valid values are:
+	// - "v1": PROXY protocol version 1 (human-readable text header)
+	// - "v2": PROXY protocol version 2 (binary header)
+	// - "tproxy": Linux transparent proxy (IP_TRANSPARENT client IP spoofing)
+	// - "": disabled (default)
+	ProxyProtocol string `json:"proxyProtocol,omitempty"`
+	// ProxyProtocolVersion is a backward-compatible alias for ProxyProtocol.
 	ProxyProtocolVersion string `json:"proxyProtocolVersion,omitempty"`
+	// ProxyProtocolMode specifies how proxy protocol headers are sent for UDP proxies (v1/v2).
+	// Valid values are "first-packet" (default, sends on the first packet of a new flow)
+	// and "per-packet" (sends on every UDP datagram, required for standard HAProxy/NGINX UDP proxying).
+	ProxyProtocolMode string `json:"proxyProtocolMode,omitempty"`
+	// SocketMark sets SO_MARK on outgoing transparent connections for policy routing.
+	// Ignored if ProxyProtocol is not "tproxy". If ProxyProtocol is "tproxy" and
+	// SocketMark is not specified (or 0), it defaults to 1.
+	SocketMark int `json:"socketMark,omitempty"`
 }
 
 type LoadBalancerConfig struct {
@@ -154,6 +167,21 @@ func (c *ProxyBaseConfig) GetBaseConfig() *ProxyBaseConfig {
 func (c *ProxyBaseConfig) Complete() {
 	c.LocalIP = util.EmptyOr(c.LocalIP, "127.0.0.1")
 	c.Transport.BandwidthLimitMode = util.EmptyOr(c.Transport.BandwidthLimitMode, types.BandwidthLimitModeClient)
+	if c.Transport.ProxyProtocol == "" && c.Transport.ProxyProtocolVersion != "" {
+		c.Transport.ProxyProtocol = c.Transport.ProxyProtocolVersion
+	}
+	switch c.Transport.ProxyProtocol {
+	case "v1", "v2":
+		c.Transport.ProxyProtocolMode = util.EmptyOr(c.Transport.ProxyProtocolMode, "first-packet")
+		c.Transport.SocketMark = 0
+	case "tproxy":
+		if c.Transport.SocketMark == 0 {
+			c.Transport.SocketMark = 1
+		}
+	default:
+		c.Transport.SocketMark = 0
+	}
+	c.Transport.ProxyProtocolVersion = c.Transport.ProxyProtocol
 
 	if c.Plugin.ClientPluginOptions != nil {
 		c.Plugin.Complete()
@@ -291,18 +319,39 @@ type UDPProxyConfig struct {
 	ProxyBaseConfig
 
 	RemotePort int `json:"remotePort,omitempty"`
+
+	// QUICDatagrams relays UDP packets as unreliable QUIC datagrams
+	// (RFC 9221) on the frpc<->frps connection instead of the reliable
+	// work-connection stream. Avoids head-of-line blocking and outer
+	// retransmission for payloads that tolerate loss themselves (VPN
+	// DTLS, WireGuard, RTP). Requires transport.protocol = "quic" and a
+	// server with datagram support; falls back to the stream otherwise.
+	// Packets exceeding the QUIC datagram budget for the path
+	// (~1200-1400 bytes) also fall back to the stream per-packet.
+	// Incompatible with useEncryption/useCompression (stream wrappers).
+	QUICDatagrams bool `json:"quicDatagrams,omitempty"`
+
+	// QUICDatagramStrict drops oversized UDP packets instead of falling back
+	// to the reliable stream lane. This eliminates cross-lane packet reordering
+	// and stream head-of-line blocking for jitter- and replay-window-sensitive
+	// protocols like WireGuard and DTLS.
+	QUICDatagramStrict bool `json:"quicDatagramStrict,omitempty"`
 }
 
 func (c *UDPProxyConfig) MarshalToMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.MarshalToMsg(m)
 
 	m.RemotePort = c.RemotePort
+	m.UDPDatagram = c.QUICDatagrams
+	m.UDPDatagramStrict = c.QUICDatagramStrict
 }
 
 func (c *UDPProxyConfig) UnmarshalFromMsg(m *msg.NewProxy) {
 	c.ProxyBaseConfig.UnmarshalFromMsg(m)
 
 	c.RemotePort = m.RemotePort
+	c.QUICDatagrams = m.UDPDatagram
+	c.QUICDatagramStrict = m.UDPDatagramStrict
 }
 
 func (c *UDPProxyConfig) Clone() ProxyConfigurer {

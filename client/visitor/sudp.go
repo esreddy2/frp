@@ -21,8 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fatedier/golib/errors"
-
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/msg"
 	"github.com/fatedier/frp/pkg/proto/udp"
@@ -62,7 +60,7 @@ func (sv *SUDPVisitor) Run() (err error) {
 	xl.Infof("sudp start to work, listen on %s", addr)
 
 	go sv.dispatcher()
-	go udp.ForwardUserConn(sv.udpConn, sv.readCh, sv.sendCh, int(sv.clientCfg.UDPPacketSize))
+	go udp.ForwardUserConn(sv.udpConn, sv.readCh, sv.sendCh, sv.checkCloseCh, int(sv.clientCfg.UDPPacketSize))
 
 	return
 }
@@ -152,12 +150,18 @@ func (sv *SUDPVisitor) worker(workConn net.Conn, firstPacket *msg.UDPPacket) {
 				xl.Debugf("frpc visitor get ping message from frpc")
 				continue
 			case *msg.UDPPacket:
-				if errRet := errors.PanicToError(func() {
-					sv.readCh <- m
-					xl.Tracef("frpc visitor get udp packet from workConn, len: %d", len(m.Content))
-				}); errRet != nil {
-					xl.Infof("reader goroutine for udp work connection closed")
+				select {
+				case sv.readCh <- m:
+				case <-sv.checkCloseCh:
+					// The visitor is closed: the channel is not read
+					// anymore, so the packet is dropped.
 					return
+				default:
+					// The channel is full: the consumer is stalled. The
+					// packet is dropped and the reader keeps running, so
+					// a user that stops reading for a moment does not
+					// break the work connection of the visitor.
+					xl.Tracef("visitor readCh is full, drop a udp package")
 				}
 			}
 		}
@@ -232,6 +236,9 @@ func (sv *SUDPVisitor) Close() {
 	if sv.udpConn != nil {
 		sv.udpConn.Close()
 	}
-	close(sv.readCh)
-	close(sv.sendCh)
+	// The channels are not closed here. The worker of the visitor sends on
+	// readCh, and a send on a closed channel panics even when it is in a
+	// select with a default branch. That panic happens in a goroutine that
+	// does not recover it, so it would take the whole client process down.
+	// The stop channel ends the worker instead.
 }

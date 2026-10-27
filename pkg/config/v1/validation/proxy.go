@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/naming"
 )
 
 func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
@@ -33,8 +34,21 @@ func validateProxyBaseConfigForClient(c *v1.ProxyBaseConfig) error {
 	if err := ValidateAnnotations(c.Annotations); err != nil {
 		return err
 	}
-	if !slices.Contains([]string{"", "v1", "v2"}, c.Transport.ProxyProtocolVersion) {
-		return fmt.Errorf("not support proxy protocol version: %s", c.Transport.ProxyProtocolVersion)
+	effectiveProxyProtocol := c.Transport.ProxyProtocol
+	if effectiveProxyProtocol == "" {
+		effectiveProxyProtocol = c.Transport.ProxyProtocolVersion
+	}
+	if !slices.Contains([]string{"", "v1", "v2", "tproxy"}, effectiveProxyProtocol) {
+		return fmt.Errorf("not support proxy protocol: %s, optional values are [v1, v2, tproxy]", effectiveProxyProtocol)
+	}
+	if !slices.Contains([]string{"", "first-packet", "per-packet"}, c.Transport.ProxyProtocolMode) {
+		return fmt.Errorf("not support proxy protocol mode: %s, optional values are [first-packet, per-packet]", c.Transport.ProxyProtocolMode)
+	}
+	if c.Transport.ProxyProtocolMode != "" && effectiveProxyProtocol != "v1" && effectiveProxyProtocol != "v2" {
+		return fmt.Errorf("transport.proxyProtocolMode requires transport.proxyProtocol to be set to v1 or v2")
+	}
+	if c.Transport.SocketMark < 0 {
+		return fmt.Errorf("transport.socketMark should be greater than or equal to 0")
 	}
 	if !slices.Contains([]string{"client", "server"}, c.Transport.BandwidthLimitMode) {
 		return fmt.Errorf("bandwidth limit mode should be client or server")
@@ -101,7 +115,10 @@ func validateDomainConfigForServer(c *v1.DomainConfig, s *v1.ServerConfig) error
 	return nil
 }
 
-func ValidateProxyConfigurerForClient(c v1.ProxyConfigurer) error {
+// ValidateProxyConfigurerForClient validates a proxy config for the client.
+// The user is the user name of the client: the wire-level name of a proxy
+// is the proxy name with the user prefix, and some rules depend on it.
+func ValidateProxyConfigurerForClient(c v1.ProxyConfigurer, user string) error {
 	base := c.GetBaseConfig()
 	if err := validateProxyBaseConfigForClient(base); err != nil {
 		return err
@@ -111,7 +128,7 @@ func ValidateProxyConfigurerForClient(c v1.ProxyConfigurer) error {
 	case *v1.TCPProxyConfig:
 		return validateTCPProxyConfigForClient(v)
 	case *v1.UDPProxyConfig:
-		return validateUDPProxyConfigForClient(v)
+		return validateUDPProxyConfigForClient(v, user)
 	case *v1.TCPMuxProxyConfig:
 		return validateTCPMuxProxyConfigForClient(v)
 	case *v1.HTTPProxyConfig:
@@ -132,7 +149,22 @@ func validateTCPProxyConfigForClient(c *v1.TCPProxyConfig) error {
 	return nil
 }
 
-func validateUDPProxyConfigForClient(c *v1.UDPProxyConfig) error {
+func validateUDPProxyConfigForClient(c *v1.UDPProxyConfig, user string) error {
+	if c.QUICDatagrams {
+		// The quic datagram lane identifies a proxy by its wire-level
+		// name, and the identifier field of a datagram frame holds a
+		// single length byte. A proxy whose wire-level name does not fit
+		// cannot be addressed by the lane at all, so the request cannot
+		// be satisfied.
+		wireName := naming.AddUserPrefix(user, c.Name)
+		if len(wireName) > naming.MaxDatagramIdentifierLength {
+			return fmt.Errorf("the quic datagram lane needs a wire-level proxy name of at most %d bytes, but the name with the user prefix is %d bytes",
+				naming.MaxDatagramIdentifierLength, len(wireName))
+		}
+	}
+	if c.QUICDatagramStrict && !c.QUICDatagrams {
+		return errors.New("quicDatagramStrict requires quicDatagrams to be true")
+	}
 	return nil
 }
 
@@ -263,9 +295,9 @@ const TotalAnnotationSizeLimitB int = 256 * (1 << 10) // 256 kB
 func ValidateAnnotationsSize(annotations map[string]string) error {
 	var totalSize int64
 	for k, v := range annotations {
-		totalSize += (int64)(len(k)) + (int64)(len(v))
+		totalSize += int64(len(k)) + int64(len(v))
 	}
-	if totalSize > (int64)(TotalAnnotationSizeLimitB) {
+	if totalSize > int64(TotalAnnotationSizeLimitB) {
 		return fmt.Errorf("annotations size %d is larger than limit %d", totalSize, TotalAnnotationSizeLimitB)
 	}
 	return nil

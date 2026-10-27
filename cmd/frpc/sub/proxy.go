@@ -90,7 +90,7 @@ func NewProxyCommand(name string, c v1.ProxyConfigurer, clientCfg *v1.ClientComm
 			c.GetBaseConfig().Type = name
 			c.Complete()
 			proxyCfg := c
-			if err := validation.ValidateProxyConfigurerForClient(proxyCfg); err != nil {
+			if err := validation.ValidateProxyConfigurerForClient(proxyCfg, clientCfg.User); err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}

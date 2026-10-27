@@ -47,23 +47,52 @@ func RegisterProxyFactory(proxyConfType reflect.Type, factory func(*BaseProxy) P
 }
 
 type WorkConn struct {
-	conn *msg.Conn
+	conn      *msg.Conn
+	closeOnce sync.Once
+	closeErr  error
+	onClose   func()
 }
 
 func NewWorkConn(conn *msg.Conn) *WorkConn {
 	return &WorkConn{conn: conn}
 }
 
+// SetCloseCallback records the owning control's release callback. The owner
+// sets it before publishing this connection to its work pool.
+func (c *WorkConn) SetCloseCallback(fn func()) { c.onClose = fn }
+
 func (c *WorkConn) Start(m *msg.StartWorkConn) (net.Conn, error) {
 	if err := c.conn.WriteMsg(m); err != nil {
 		return nil, err
 	}
-	return c.conn, nil
+	return &workConnStream{Conn: c.conn, owner: c}, nil
+}
+
+// Interrupt aborts in-flight I/O and bounds any transport close handshake when
+// the owning control retires. Normal stream completion still uses Close.
+func (c *WorkConn) Interrupt() error {
+	_ = c.conn.SetDeadline(time.Now())
+	return c.Close()
 }
 
 func (c *WorkConn) Close() error {
-	return c.conn.Close()
+	c.closeOnce.Do(func() {
+		c.closeErr = c.conn.Close()
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.closeErr
 }
+
+// workConnStream keeps the owning WorkConn in the close path so that the
+// control can stop tracking the stream as soon as it is done.
+type workConnStream struct {
+	net.Conn
+	owner *WorkConn
+}
+
+func (c *workConnStream) Close() error { return c.owner.Close() }
 
 type GetWorkConnFn func() (*WorkConn, error)
 
@@ -96,6 +125,11 @@ type BaseProxy struct {
 	configurer     v1.ProxyConfigurer
 	wireProtocol   string
 	udpPacketCodec string
+
+	// udp proxies with quicDatagrams: relay packets as unreliable QUIC
+	// datagrams when the work connection rides a QUIC connection.
+	udpDatagramWanted bool
+	udpDatagramStrict bool
 
 	mu  sync.RWMutex
 	xl  *xlog.Logger
@@ -153,8 +187,12 @@ func (pxy *BaseProxy) GetWorkConnFromPool(src, dst net.Addr) (workConn net.Conn,
 			xl.Warnf("failed to get work connection: %v", err)
 			return
 		}
-		xl.Debugf("get a new work connection: [%s]", pxyWorkConn.conn.RemoteAddr().String())
-		xl.Spawn().AppendPrefix(pxy.GetName())
+		// xl.Spawn().AppendPrefix(pxy.GetName()) used to live here but the
+		// resulting logger was discarded, so it allocated a new logger object
+		// on every work-connection pool lookup for no observable effect. The
+		// prefix is only meaningful for the per-connection handler, which
+		// already takes its own logger via FromContextSafe, so remove it.
+		_ = pxy.GetName()
 
 		var (
 			srcAddr    string
@@ -173,13 +211,23 @@ func (pxy *BaseProxy) GetWorkConnFromPool(src, dst net.Addr) (workConn net.Conn,
 			dstAddr, dstPortStr, _ = net.SplitHostPort(dst.String())
 			dstPort, _ = strconv.ParseUint(dstPortStr, 10, 16)
 		}
+		// confirm QUIC datagram relay only when this specific work
+		// connection can actually carry it
+		udpDatagram := false
+		if pxy.udpDatagramWanted {
+			if qc := netpkg.GetQuicConnFromNetConn(pxyWorkConn.conn); qc != nil && qc.ConnectionState().SupportsDatagrams.Remote {
+				udpDatagram = true
+			}
+		}
 		workConn, err = pxyWorkConn.Start(&msg.StartWorkConn{
-			ProxyName: pxy.GetName(),
-			SrcAddr:   srcAddr,
-			SrcPort:   uint16(srcPort),
-			DstAddr:   dstAddr,
-			DstPort:   uint16(dstPort),
-			Error:     "",
+			ProxyName:         pxy.GetName(),
+			SrcAddr:           srcAddr,
+			SrcPort:           uint16(srcPort),
+			DstAddr:           dstAddr,
+			DstPort:           uint16(dstPort),
+			Error:             "",
+			UDPDatagram:       udpDatagram,
+			UDPDatagramStrict: udpDatagram && pxy.udpDatagramStrict,
 		})
 		if err != nil {
 			xl.Warnf("failed to send message to work connection from pool: %v, times: %d", err, i)

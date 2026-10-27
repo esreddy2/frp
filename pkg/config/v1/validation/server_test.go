@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
+	splugin "github.com/fatedier/frp/pkg/plugin/server"
 )
 
 func TestValidateServerConfigMaxPoolCount(t *testing.T) {
@@ -48,4 +49,72 @@ func TestValidateServerConfigMaxPoolCount(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestValidateServerConfigHTTPPluginOps(t *testing.T) {
+	cfg := validServerConfigWithAuth(v1.AuthServerConfig{Method: v1.AuthMethodToken})
+	cfg.HTTPPlugins = []v1.HTTPPluginOptions{
+		{
+			Name: "admission",
+			Addr: "127.0.0.1:9000",
+			Path: "/plugin",
+			Ops:  []string{splugin.OpNewProxy, splugin.OpNewProxyResult, splugin.OpCloseProxy},
+		},
+	}
+	require.NoError(t, cfg.Complete())
+
+	_, err := NewConfigValidator(nil).ValidateServerConfig(cfg)
+	require.NoError(t, err)
+}
+
+func TestValidateServerConfigNewProxyResultRequiresCloseProxy(t *testing.T) {
+	cfg := validServerConfigWithAuth(v1.AuthServerConfig{Method: v1.AuthMethodToken})
+	cfg.HTTPPlugins = []v1.HTTPPluginOptions{
+		{
+			Name: "admission",
+			Addr: "127.0.0.1:9000",
+			Path: "/plugin",
+			Ops:  []string{splugin.OpNewProxy, splugin.OpNewProxyResult},
+		},
+	}
+	require.NoError(t, cfg.Complete())
+
+	_, err := NewConfigValidator(nil).ValidateServerConfig(cfg)
+	require.ErrorContains(t, err, "requires CloseProxy for admission rollback")
+}
+
+func TestValidateServerConfigNewProxyResultHeartbeatBudget(t *testing.T) {
+	cfg := validServerConfigWithAuth(v1.AuthServerConfig{Method: v1.AuthMethodToken})
+	cfg.HTTPPlugins = []v1.HTTPPluginOptions{
+		{
+			Name: "admission",
+			Addr: "127.0.0.1:9000",
+			Path: "/plugin",
+			Ops:  []string{splugin.OpNewProxy, splugin.OpNewProxyResult, splugin.OpCloseProxy},
+		},
+	}
+	// One NewProxy and one NewProxyResult callback cost 2 * 25s of the
+	// synchronous budget, so a 40s heartbeat timeout is too small.
+	cfg.Transport.HeartbeatTimeout = 40
+	require.NoError(t, cfg.Complete())
+
+	_, err := NewConfigValidator(nil).ValidateServerConfig(cfg)
+	require.ErrorContains(t, err, "must exceed aggregate synchronous NewProxy callback budget")
+}
+
+func TestValidateServerConfigNewProxyResultHeartbeatBudgetWithoutHeartbeat(t *testing.T) {
+	cfg := validServerConfigWithAuth(v1.AuthServerConfig{Method: v1.AuthMethodToken})
+	cfg.HTTPPlugins = []v1.HTTPPluginOptions{
+		{
+			Name: "admission",
+			Addr: "127.0.0.1:9000",
+			Path: "/plugin",
+			Ops:  []string{splugin.OpNewProxy, splugin.OpNewProxyResult, splugin.OpCloseProxy},
+		},
+	}
+	cfg.Transport.HeartbeatTimeout = 0
+	require.NoError(t, cfg.Complete())
+
+	_, err := NewConfigValidator(nil).ValidateServerConfig(cfg)
+	require.NoError(t, err)
 }

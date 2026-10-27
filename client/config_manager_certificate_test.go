@@ -95,7 +95,7 @@ keyPath = %q
 			sender := &certificateReloadSender{started: make(chan string, 4)}
 			transporter := transport.NewMessageTransporter(sender)
 			ctx := context.Background()
-			pm := proxy.NewManager(ctx, result.Common, nil, transporter, nil, "")
+			pm := proxy.NewManager(ctx, result.Common, nil, transporter, nil, "", nil)
 			vm := visitor.NewManager(ctx, "", result.Common, nil, transporter, nil)
 			t.Cleanup(pm.Close)
 			t.Cleanup(vm.Close)
@@ -236,7 +236,7 @@ keyPath = %q
 			transporter := transport.NewMessageTransporter(sender)
 			newControl := func() *Control {
 				ctx := context.Background()
-				pm := proxy.NewManager(ctx, result.Common, nil, transporter, nil, "")
+				pm := proxy.NewManager(ctx, result.Common, nil, transporter, nil, "", nil)
 				vm := visitor.NewManager(ctx, "", result.Common, nil, transporter, nil)
 				t.Cleanup(pm.Close)
 				t.Cleanup(vm.Close)

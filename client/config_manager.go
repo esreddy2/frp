@@ -467,7 +467,13 @@ func (m *serviceConfigManager) validateStoreProxyConfigurer(cfg v1.ProxyConfigur
 		return fmt.Errorf("invalid proxy config")
 	}
 	runtimeCfg.Complete()
-	return validation.ValidateProxyConfigurerForClient(runtimeCfg)
+	// The user of the client is the prefix of the wire-level name of
+	// every proxy, so the proxy rules are checked against it.
+	var user string
+	if m.svr.common != nil {
+		user = m.svr.common.User
+	}
+	return validation.ValidateProxyConfigurerForClient(runtimeCfg, user)
 }
 
 func (m *serviceConfigManager) validateStoreVisitorConfigurer(cfg v1.VisitorConfigurer) error {

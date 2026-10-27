@@ -16,12 +16,14 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"reflect"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	libio "github.com/fatedier/golib/io"
@@ -45,6 +47,14 @@ func RegisterProxyFactory(proxyConfType reflect.Type, factory func(*BaseProxy, v
 	proxyFactoryRegistry[proxyConfType] = factory
 }
 
+// MessageConnector is the interface used by proxies to obtain message
+// streams from the client connector. Defined here (rather than in the
+// client package) to avoid an import cycle.
+type MessageConnector interface {
+	Connect() (*msg.Conn, error)
+	Close() error
+}
+
 // Proxy defines how to handle work connections for different proxy type.
 type Proxy interface {
 	Run() error
@@ -62,6 +72,7 @@ func NewProxy(
 	msgTransporter transport.MessageTransporter,
 	vnetController *vnet.Controller,
 	udpPacketCodec string,
+	connector MessageConnector,
 ) (pxy Proxy) {
 	var limiter *rate.Limiter
 	limitBytes := pxyConf.GetBaseConfig().Transport.BandwidthLimit.Bytes()
@@ -79,6 +90,17 @@ func NewProxy(
 		xl:             xlog.FromContextSafe(ctx),
 		ctx:            ctx,
 		udpPacketCodec: udpPacketCodec,
+		connector:      connector,
+	}
+
+	if pxyConf.GetBaseConfig().Transport.ProxyProtocol == "tproxy" {
+		warnings, err := netpkg.CheckTransparentSupport(pxyConf.GetBaseConfig().LocalIP)
+		if err != nil {
+			baseProxy.xl.Errorf("transparent proxy configuration error: %v", err)
+		}
+		for _, w := range warnings {
+			baseProxy.xl.Warnf("transparent proxy policy warning: %s", w)
+		}
 	}
 
 	factory := proxyFactoryRegistry[reflect.TypeOf(pxyConf)]
@@ -99,11 +121,17 @@ type BaseProxy struct {
 	// It's only validate for TCP protocol now.
 	proxyPlugin        plugin.Plugin
 	inWorkConnCallback func(*v1.ProxyBaseConfig, net.Conn, *msg.StartWorkConn) /* continue */ bool
+	connector          MessageConnector
 
 	mu             sync.RWMutex
 	xl             *xlog.Logger
 	ctx            context.Context
 	udpPacketCodec string
+}
+
+// GetName returns the proxy name.
+func (pxy *BaseProxy) GetName() string {
+	return pxy.baseCfg.Name
 }
 
 func (pxy *BaseProxy) Run() error {
@@ -210,8 +238,9 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 		connInfo.DstAddr = dstAddr
 	}
 
-	if baseCfg.Transport.ProxyProtocolVersion != "" && m.SrcAddr != "" && m.SrcPort != 0 {
-		header := netpkg.BuildProxyProtocolHeaderStruct(connInfo.SrcAddr, connInfo.DstAddr, baseCfg.Transport.ProxyProtocolVersion)
+	isTProxy := baseCfg.Transport.ProxyProtocol == "tproxy"
+	if !isTProxy && baseCfg.Transport.ProxyProtocol != "" && m.SrcAddr != "" && m.SrcPort != 0 {
+		header := netpkg.BuildProxyProtocolHeaderStruct(connInfo.SrcAddr, connInfo.DstAddr, baseCfg.Transport.ProxyProtocol)
 		connInfo.ProxyProtocolHeader = header
 	}
 	connInfo.Conn = remote
@@ -231,14 +260,57 @@ func (pxy *BaseProxy) HandleTCPWorkConnection(workConn net.Conn, m *msg.StartWor
 		defer recycleFn()
 	}
 
-	localConn, err := libnet.Dial(
-		net.JoinHostPort(baseCfg.LocalIP, strconv.Itoa(baseCfg.LocalPort)),
-		libnet.WithTimeout(10*time.Second),
-	)
+	var localConn net.Conn
+	if isTProxy {
+		dstTCPAddr, resolveErr := net.ResolveTCPAddr("tcp", net.JoinHostPort(baseCfg.LocalIP, strconv.Itoa(baseCfg.LocalPort)))
+		if resolveErr != nil {
+			workConn.Close()
+			xl.Errorf("resolve local service [%s:%d] error: %v", baseCfg.LocalIP, baseCfg.LocalPort, resolveErr)
+			return
+		}
+		localConn, err = netpkg.DialTCPTransparent(
+			pxy.ctx,
+			srcAddr,
+			dstTCPAddr,
+			10*time.Second,
+			baseCfg.Transport.SocketMark,
+		)
+	} else {
+		localConn, err = libnet.Dial(
+			net.JoinHostPort(baseCfg.LocalIP, strconv.Itoa(baseCfg.LocalPort)),
+			libnet.WithTimeout(10*time.Second),
+		)
+	}
 	if err != nil {
 		workConn.Close()
-		xl.Errorf("connect to local service [%s:%d] error: %v", baseCfg.LocalIP, baseCfg.LocalPort, err)
+		if isTProxy {
+			if errors.Is(err, syscall.EPERM) {
+				xl.Errorf("transparent connect to local service [%s:%d] failed with EPERM: "+
+					"process lacks CAP_NET_ADMIN (run 'sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)')",
+					baseCfg.LocalIP, baseCfg.LocalPort)
+			} else if errors.Is(err, syscall.EADDRNOTAVAIL) {
+				xl.Errorf("transparent connect to local service [%s:%d] failed with EADDRNOTAVAIL: "+
+					"kernel rejected spoofed address [%s]; check IP_TRANSPARENT and routing tables",
+					baseCfg.LocalIP, baseCfg.LocalPort, srcAddr.String())
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				xl.Errorf("transparent connect to local service [%s:%d] timed out: "+
+					"backend may not route return packets back to frpc; verify 'ip rule' and iptables mangle table",
+					baseCfg.LocalIP, baseCfg.LocalPort)
+			} else {
+				xl.Errorf("transparent connect to local service [%s:%d] error: %v", baseCfg.LocalIP, baseCfg.LocalPort, err)
+			}
+		} else {
+			xl.Errorf("connect to local service [%s:%d] error: %v", baseCfg.LocalIP, baseCfg.LocalPort, err)
+		}
 		return
+	}
+
+	// Disable Nagle's algorithm on the local service connection. The local
+	// service is typically an interactive protocol (game servers, real-time
+	// chat) that sends small packets frequently; Nagle delays them up to ~40ms
+	// waiting to coalesce with ACKs, which manifests as lag spikes.
+	if tcpConn, ok := localConn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
 	}
 
 	xl.Debugf("join connections, localConn(l[%s] r[%s]) workConn(l[%s] r[%s])", localConn.LocalAddr().String(),

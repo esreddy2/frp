@@ -295,6 +295,7 @@ func TestServiceConfigManagerCreateStoreProxyConflict(t *testing.T) {
 			aggregator:   agg,
 			configSource: agg.ConfigSource(),
 			storeSource:  storeSource,
+			common:       &v1.ClientCommonConfig{},
 			reloadCommon: &v1.ClientCommonConfig{},
 		},
 	}
@@ -319,6 +320,7 @@ func TestServiceConfigManagerCreateStoreProxyKeepsStoreOnReloadFailure(t *testin
 	mgr := &serviceConfigManager{
 		svr: &Service{
 			storeSource:  storeSource,
+			common:       &v1.ClientCommonConfig{},
 			reloadCommon: &v1.ClientCommonConfig{},
 		},
 	}
@@ -338,6 +340,7 @@ func TestServiceConfigManagerCreateStoreProxyKeepsStoreOnReloadFailure(t *testin
 func TestServiceConfigManagerCreateStoreProxyStoreDisabled(t *testing.T) {
 	mgr := &serviceConfigManager{
 		svr: &Service{
+			common:       &v1.ClientCommonConfig{},
 			reloadCommon: &v1.ClientCommonConfig{},
 		},
 	}
@@ -366,6 +369,7 @@ func TestServiceConfigManagerCreateStoreProxyDoesNotPersistRuntimeDefaults(t *te
 			aggregator:   agg,
 			configSource: agg.ConfigSource(),
 			storeSource:  storeSource,
+			common:       &v1.ClientCommonConfig{},
 			reloadCommon: &v1.ClientCommonConfig{},
 		},
 	}
