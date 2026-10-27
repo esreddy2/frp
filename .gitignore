@@ -35,3 +35,6 @@ node_modules/
 .claude/
 .sisyphus/
 .superpowers/
+.audit/
+.kilo/
+doc/FORK_RELEASE_MASTER.md

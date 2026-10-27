@@ -21,6 +21,12 @@ kcpBindPort = 7000
 # transport.quic.keepalivePeriod = 10
 # transport.quic.maxIdleTimeout = 30
 # transport.quic.maxIncomingStreams = 100000
+# transport.quic.enableDatagrams = true
+# transport.quic.enable0Rtt = false
+# frp does not support QUIC 0-RTT: the first message a client sends on a QUIC
+# connection carries its credential, and 0-RTT early data is replayable, so
+# the server refuses early data. The option is accepted for compatibility and
+# only enables the client's address validation token cache.
 
 # Heartbeat configure, it's not recommended to modify the default value
 # The default value of heartbeatTimeout is 90. Set negative value to disable it.
@@ -46,6 +52,13 @@ transport.tls.force = false
 # transport.tls.certFile = "server.crt"
 # transport.tls.keyFile = "server.key"
 # transport.tls.trustedCaFile = "ca.crt"
+
+# Wire protocol version for frps control communication.
+# supports v1 and v2, default is v1. v2 enables X25519 key agreement and AEAD framing.
+# transport.wireProtocol = "v1"
+
+# with wireProtocol v2, refuse clients that do not perform the X25519 key exchange, default is false.
+# transport.requireKeyShare = false
 
 # If you want to support virtual host, you must set the http port for listening (optional)
 # Note: http port and https port can be same with bindPort

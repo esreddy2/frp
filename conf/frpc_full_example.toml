@@ -121,6 +121,9 @@ transport.protocol = "tcp"
 # supports v1 and v2, default is v1. v2 requires frps support and must be enabled explicitly.
 # transport.wireProtocol = "v1"
 
+# with wireProtocol v2, refuse servers that do not perform the X25519 key exchange, default is false.
+# transport.requireKeyShare = false
+
 # set client binding ip when connect server, default is empty.
 # only when protocol = tcp or websocket, the value will be used.
 transport.connectServerLocalIP = "0.0.0.0"
@@ -135,9 +138,17 @@ transport.connectServerLocalIP = "0.0.0.0"
 # transport.quic.keepalivePeriod = 10
 # transport.quic.maxIdleTimeout = 30
 # transport.quic.maxIncomingStreams = 100000
+# transport.quic.enableDatagrams = true
+# transport.quic.enable0Rtt = false
+# frp does not support QUIC 0-RTT: the first message a client sends on a QUIC
+# connection carries its credential, and 0-RTT early data is replayable, so
+# the server refuses early data. The option is accepted for compatibility and
+# only enables the client's address validation token cache.
 
 # If tls.enable is true, frpc will connect frps by tls.
 # Since v0.50.0, the default value has been changed to true, and tls is enabled by default.
+# The wss and quic transports always run over tls, so the settings below are applied
+# even when tls.enable is false.
 transport.tls.enable = true
 
 # transport.tls.certFile = "client.crt"
@@ -147,7 +158,7 @@ transport.tls.enable = true
 
 # If useSystemCa is true, frpc verifies the server certificate using system CAs.
 # If trustedCaFile is also set, its CA certificates are added to the system CA pool.
-# Only supported in frpc transport.tls; requires tls.enable = true unless protocol is wss.
+# Only supported in frpc transport.tls; requires tls.enable = true unless protocol is wss or quic.
 # CA loading or certificate verification failures cause the connection to fail.
 # transport.tls.useSystemCa = false
 
@@ -253,6 +264,14 @@ type = "udp"
 localIP = "114.114.114.114"
 localPort = 53
 remotePort = 6002
+# Enable RFC 9221 QUIC datagram relay for this UDP proxy (requires transport.protocol = "quic")
+# quicDatagrams = true
+# In strict mode, oversized datagrams are dropped instead of falling back to stream,
+# preserving packet ordering and anti-replay windows for WireGuard, DTLS, and voice/game traffic
+# quicDatagramStrict = false
+# Proxy protocol mode for UDP proxies when transport.proxyProtocol is "v1" or "v2".
+# Can be "first-packet" (default) or "per-packet" (for stateless upstream load balancers like HAProxy mode udp).
+# transport.proxyProtocolMode = "first-packet"
 
 # Resolve your domain names to [serverAddr] so you can use http://web01.yourdomain.com to browse web01 and http://web02.yourdomain.com to browse web02
 [[proxies]]
@@ -295,9 +314,13 @@ localIP = "127.0.0.1"
 localPort = 8000
 subdomain = "web02"
 customDomains = ["web02.yourdomain.com"]
-# if not empty, frpc will use proxy protocol to transfer connection info to your local service
-# v1 or v2 or empty
-transport.proxyProtocolVersion = "v2"
+# Specifies how original client address is conveyed to local service:
+# "v1" (PROXY protocol v1), "v2" (PROXY protocol v2), "tproxy" (Linux IP_TRANSPARENT client IP spoofing), or empty (default).
+# transport.proxyProtocolVersion is also supported as a backward-compatible alias.
+transport.proxyProtocol = "v2"
+# When proxyProtocol = "tproxy", transport.socketMark specifies the Linux socket mark (fwmark)
+# used for kernel policy routing. Defaults to 1 if omitted.
+# transport.socketMark = 1
 
 [[proxies]]
 name = "tcpmuxhttpconnect"

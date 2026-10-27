@@ -1,116 +1,263 @@
-# frp
+# frp (性能与优化增强版)
 
-[![Build Status](https://circleci.com/gh/fatedier/frp.svg?style=shield)](https://circleci.com/gh/fatedier/frp)
-[![GitHub release](https://img.shields.io/github/tag/fatedier/frp.svg?label=release)](https://github.com/fatedier/frp/releases)
-[![GitHub Releases Stats](https://img.shields.io/github/downloads/fatedier/frp/total.svg?logo=github)](https://somsubhra.github.io/github-release-stats/?username=fatedier&repository=frp)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 [README](README.md) | [中文文档](README_zh.md)
 
-frp 是一个专注于内网穿透的高性能的反向代理应用，支持 TCP、UDP、HTTP、HTTPS 等多种协议，且支持 P2P 通信。可以将内网服务以安全、便捷的方式通过具有公网 IP 节点的中转暴露到公网。
+本项目是基于 [fatedier/frp](https://github.com/fatedier/frp)（基于 `v0.71.1`）的个人优化与增强分支，专注于网络性能优化、低延迟 UDP 隧道及协议增强。配置格式与选项与官方 frp 保持一致，现有的配置文件可直接使用。
 
-## Sponsors
+---
 
-frp 是一个完全开源的项目，我们的开发工作完全依靠赞助者们的支持。如果你愿意加入他们的行列，请考虑 [赞助 frp 的开发](https://github.com/sponsors/fatedier)。
+## 目录
 
-<h3 align="center">Gold Sponsors</h3>
-<!--gold sponsors start-->
-<div align="center">
+- [核心特性与功能增强](#核心特性与功能增强)
+- [快速入门](#快速入门)
+  - [1. 服务端 (`frps`)](#1-服务端-frps)
+  - [2. 客户端 (`frpc`)](#2-客户端-frpc)
+- [增强特性与配置示例](#增强特性与配置示例)
+  - [1. Linux 透明代理与真实客户端 IP 保持 (`tproxy`)](#1-linux-透明代理与真实客户端-ip-保持-tproxy)
+  - [2. RFC 9221 QUIC 数据报中继 (`quicDatagrams`)](#2-rfc-9221-quic-数据报中继-quicdatagrams)
+  - [3. UDP 每包 PROXY Protocol 模式 (`per-packet`)](#3-udp-每包-proxy-protocol-模式-per-packet)
+  - [4. Wire Protocol v2 与硬件级 AEAD 加密](#4-wire-protocol-v2-与硬件级-aead-加密)
+  - [5. 服务端插件两阶段准入确认 (`NewProxyResult`)](#5-服务端插件两阶段准入确认-newproxyresult)
+  - [6. 独立监控与可观测性端口 (`metricsServer`)](#6-独立监控与可观测性端口-metricsserver)
+- [高并发与稳定性加固](#高并发与稳定性加固)
+- [文档索引](#文档索引)
+- [配置兼容性](#配置兼容性)
+- [开源协议](#开源协议)
 
-## Recall.ai - API for meeting recordings
+---
 
-If you're looking for a meeting recording API, consider checking out [Recall.ai](https://www.recall.ai/?utm_source=github&utm_medium=sponsorship&utm_campaign=fatedier-frp),
+## 核心特性与功能增强
 
-an API that records Zoom, Google Meet, Microsoft Teams, in-person meetings, and more.
+* **真实客户端 IP 伪装（Linux TPROXY）：** 借助 Linux 内核 `IP_TRANSPARENT` 特性，使后端真实服务直接看到来访客户端的真实源 IP 与源端口。无需后端应用支持或解析应用层 PROXY Protocol 协议头。原生具备本地端口冲突自动回退机制（保留客户端真实 IP，使用临时端口）。
+* **RFC 9221 QUIC 数据报中继：** 支持将 UDP 数据包作为不可靠、乱序到达的独立 QUIC Datagram 进行转发，彻底消除队头阻塞（Head-of-Line Blocking）。具备严格通道隔离模式（`quicDatagramStrict = true`），超大包直接丢弃而不退化为可靠流，杜绝流与数据报交叉乱序，有效保护 **WireGuard**、**IPsec** 与 **DTLS** 的抗重放滑动窗口。
+* **UDP 每数据包 PROXY Protocol 模式：** UDP 代理除了传统的首包模式外，支持 `transport.proxyProtocolMode = "per-packet"`，完美兼容无状态四层负载均衡器（如 HAProxy `mode udp` 或 NGINX Stream）。
+* **Wire Protocol v2 与硬件加速 AEAD：** 控制通道支持临时 X25519 ECDH 密钥协商与基于 HKDF-SHA256 的握手转录哈希绑定，通信帧采用硬件加速的 AES-256-GCM 或 XChaCha20-Poly1305 AEAD 加密。可配置 `transport.requireKeyShare = true` 强制开启前向安全。
+* **零内存分配低延迟优化：** 客户端与服务端连接默认开启 `TCP_NODELAY`，彻底消除 40ms Nagle 算法造成的延迟停顿；v2 消息派发采用预构建构造表代替反射；优化计时器分配，减少 GC 压力。
+* **网络超时抗抖动（Jitter-Immune Deadlines）：** 将原有的半窗口（$T/2$）保活超时刷新阈值修正为四分之一窗口（$3/4\,T$），从机制上消除因调度抖动或 Go GC 暂停导致的误断开。
+* **无阻塞 UDP 队列设计：** UDP/SUDP 读写工作通道采用 1024 包饱和丢弃缓冲队列，严格符合 RFC 768 UDP 协议语义；代理停止时同步关闭活动 UDP 连接，立即释放内核临时端口与读阻塞。
+* **两阶段服务端插件准入机制：** 新增 `NewProxyResult` 插件生命周期操作，配合不可变 128 位 `attempt_id` 事务关联；异步 `CloseProxy` 通知队列容量扩容至 2048，并引入指数退避重试与严格请求超时。
+* **代码级嵌入与系统 CA 支持：** 提供 `ServiceOptions.OnFirstLoginSuccess` 钩子用于在代理注册前对客户端会话进行鉴权校验；支持在所有 TLS 传输协议（包括 QUIC 和 WSS）中继承系统根证书库并与自定义 CA 结合；Unix 域套接字错误日志脱敏，防止泄露本地路径。
 
-</div>
+---
 
-<p align="center">
-  <a href="https://jb.gg/frp" target="_blank">
-    <img width="420px" src="https://raw.githubusercontent.com/fatedier/frp/dev/doc/pic/sponsor_jetbrains.jpg">
-	<br>
-	<b>The complete IDE crafted for professional Go developers</b>
-  </a>
-</p>
+## 快速入门
 
-<p align="center">
-  <a href="https://github.com/beclab/Olares" target="_blank">
-    <img width="420px" src="https://raw.githubusercontent.com/fatedier/frp/dev/doc/pic/sponsor_olares.jpeg">
-	<br>
-	<b>The sovereign cloud that puts you in control</b>
-	<br>
-	<sub>An open source, self-hosted alternative to public clouds, built for data ownership and privacy</sub>
-  </a>
-</p>
+### 1. 服务端 (`frps`)
 
-<!--gold sponsors end-->
+创建 `frps.toml`：
 
-## 为什么使用 frp ？
+```toml
+bindPort = 7000
+vhostHTTPPort = 80
+vhostHTTPSPort = 443
 
-通过在具有公网 IP 的节点上部署 frp 服务端，可以轻松地将内网服务穿透到公网，同时提供诸多专业的功能特性，这包括：
+auth.method = "token"
+auth.token = "your_secure_cluster_token"
 
-* 客户端服务端通信支持 TCP、QUIC、KCP 以及 Websocket 等多种协议。
-* 采用 TCP 连接流式复用，在单个连接间承载更多请求，节省连接建立时间，降低请求延迟。
-* 代理组间的负载均衡。
-* 端口复用，多个服务通过同一个服务端端口暴露。
-* 支持 P2P 通信，流量不经过服务器中转，充分利用带宽资源。
-* 多个原生支持的客户端插件（静态文件查看，HTTPS/HTTP 协议转换，HTTP、SOCK5 代理等），便于独立使用 frp 客户端完成某些工作。
-* 高度扩展性的服务端插件系统，易于结合自身需求进行功能扩展。
-* 服务端和客户端 UI 页面。
+# 启用 TCP 多路复用
+transport.tcpMux = true
 
-## 开发状态
+# 可选：启用 Wire Protocol v2 并强制密钥协商
+transport.wireProtocol = "v2"
+transport.requireKeyShare = true
+```
 
-frp 目前已被很多公司广泛用于测试、生产环境。
+启动服务端：
+```bash
+./frps -c frps.toml
+```
 
-master 分支用于发布稳定版本，dev 分支用于开发，您可以尝试下载最新的 release 版本进行测试。
+### 2. 客户端 (`frpc`)
 
-我们正在进行 v2 大版本的开发，将会尝试在各个方面进行重构和升级，且不会与 v1 版本进行兼容，预计会持续较长的一段时间。
+创建 `frpc.toml`：
 
-现在的 v0 版本将会在合适的时间切换为 v1 版本并且保证兼容性，后续只做 bug 修复和优化，不再进行大的功能性更新。
+```toml
+serverAddr = "x.x.x.x"
+serverPort = 7000
 
-### 关于 v2 的一些说明
+auth.method = "token"
+auth.token = "your_secure_cluster_token"
 
-v2 版本的复杂度和难度比我们预期的要高得多。我只能利用零散的时间进行开发，而且由于上下文经常被打断，效率极低。由于这种情况可能会持续一段时间，我们仍然会在当前版本上进行一些优化和迭代，直到我们有更多空闲时间来推进大版本的重构，或者也有可能放弃一次性的重构，而是采用渐进的方式在当前版本上逐步做一些可能会导致不兼容的修改。
+transport.tcpMux = true
+transport.wireProtocol = "v2"
+transport.requireKeyShare = true
 
-v2 的构想是基于我多年在云原生领域，特别是在 K8s 和 ServiceMesh 方面的工作经验和思考。它的核心是一个现代化的四层和七层代理，类似于 envoy。这个代理本身高度可扩展，不仅可以用于实现内网穿透的功能，还可以应用于更多领域。在这个高度可扩展的内核基础上，我们将实现 frp v1 中的所有功能，并且能够以一种更加优雅的方式实现原先架构中无法实现或不易实现的功能。同时，我们将保持高效的开发和迭代能力。
+# 标准 TCP 代理示例
+[[proxies]]
+name = "ssh-internal"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6000
+```
 
-除此之外，我希望 frp 本身也成为一个高度可扩展的系统和平台，就像我们可以基于 K8s 提供一系列扩展能力一样。在 K8s 上，我们可以根据企业需求进行定制化开发，例如使用 CRD、controller 模式、webhook、CSI 和 CNI 等。在 frp v1 中，我们引入了服务端插件的概念，实现了一些简单的扩展性。但是，它实际上依赖于简单的 HTTP 协议，并且需要用户自己启动独立的进程和管理。这种方式远远不够灵活和方便，而且现实世界的需求千差万别，我们不能期望一个由少数人维护的非营利性开源项目能够满足所有人的需求。
+启动客户端：
+```bash
+./frpc -c frpc.toml
+```
 
-最后，我们意识到像配置管理、权限验证、证书管理和管理 API 等模块的当前设计并不够现代化。尽管我们可能在 v1 版本中进行一些优化，但确保兼容性是一个令人头疼的问题，需要投入大量精力来解决。
+---
 
-非常感谢您对 frp 的支持。
+## 企业级功能与配置示例
 
-## 文档
+### 1. Linux 透明代理与真实客户端 IP 保持 (`tproxy`)
 
-完整文档已经迁移至 [https://gofrp.org](https://gofrp.org)。
+无需应用层协议支持，使后端应用直接获取客户端真实源 IP：
 
-## 为 frp 做贡献
+```toml
+# frpc.toml
+[[proxies]]
+name = "web-tproxy"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8080
+remotePort = 80
+transport.proxyProtocol = "tproxy"
+transport.socketMark = 1 # Linux fwmark 策略路由标记，默认值为 1
+```
 
-frp 是一个免费且开源的项目，我们欢迎任何人为其开发和进步贡献力量。
+**Linux 主机网络配置：**
+```bash
+# 赋予 frpc 网络管理能力（非 root 运行支持）
+sudo setcap cap_net_admin,cap_net_raw+ep $(which frpc)
 
-* 在使用过程中出现任何问题，可以通过 [issues](https://github.com/fatedier/frp/issues) 来反馈。
-* Bug 的修复可以直接提交 Pull Request 到 dev 分支。
-* 如果是增加新的功能特性，请先创建一个 issue 并做简单描述以及大致的实现方法，提议被采纳后，就可以创建一个实现新特性的 Pull Request。
-* 欢迎对说明文档做出改善，帮助更多的人使用 frp，特别是英文文档。
-* 贡献代码请提交 PR 至 dev 分支，master 分支仅用于发布稳定可用版本。
-* 如果你有任何其他方面的问题或合作，欢迎发送邮件至 fatedier@gmail.com 。
+# 开启内核转发与本地路由
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.all.route_localnet=1
 
-**提醒：和项目相关的问题请在 [issues](https://github.com/fatedier/frp/issues) 中反馈，这样方便其他有类似问题的人可以快速查找解决方法，并且也避免了我们重复回答一些问题。**
+# 添加策略路由规则，将标记流量路由至本地环回
+sudo ip rule add fwmark 1 lookup 100
+sudo ip route add local 0.0.0.0/0 dev lo table 100
+```
+详细指南请参阅 [透明代理配置文档 (doc/transparent_proxying.md)](doc/transparent_proxying.md)。
 
-## 关联项目
+---
 
-* [gofrp/plugin](https://github.com/gofrp/plugin) - frp 插件仓库，收录了基于 frp 扩展机制实现的各种插件，满足各种场景下的定制化需求。
-* [gofrp/tiny-frpc](https://github.com/gofrp/tiny-frpc) - 基于 ssh 协议实现的 frp 客户端的精简版本(最低约 3.5MB 左右)，支持常用的部分功能，适用于资源有限的设备。
+### 2. RFC 9221 QUIC 数据报中继 (`quicDatagrams`)
 
-## 赞助
+适用于游戏、VoIP、DNS 及 VPN 穿透等极度敏感于延迟的场景：
 
-如果您觉得 frp 对你有帮助，欢迎给予我们一定的捐助来维持项目的长期发展。
+```toml
+# frpc.toml
+serverAddr = "x.x.x.x"
+serverPort = 7000
+transport.protocol = "quic"
 
-### Sponsors
+# 低延迟 DNS UDP 代理
+[[proxies]]
+name = "dns-udp"
+type = "udp"
+localIP = "127.0.0.1"
+localPort = 53
+remotePort = 5353
+quicDatagrams = true
 
-长期赞助可以帮助我们保持项目的持续发展。
+# WireGuard / DTLS 严格通道隔离模式（杜绝流/数据报交叉导致重放窗口失效）
+[[proxies]]
+name = "wireguard"
+type = "udp"
+localIP = "127.0.0.1"
+localPort = 51820
+remotePort = 51820
+quicDatagrams = true
+quicDatagramStrict = true
+```
+详细指南请参阅 [QUIC 数据报中继文档 (doc/quic_datagrams.md)](doc/quic_datagrams.md)。
 
-您可以通过 [GitHub Sponsors](https://github.com/sponsors/fatedier) 赞助我们。
+---
 
-国内用户可以通过 [爱发电](https://afdian.com/a/fatedier) 赞助我们。
+### 3. UDP 每包 PROXY Protocol 模式 (`per-packet`)
 
-企业赞助者可以将贵公司的 Logo 以及链接放置在项目 README 文件中。
+适配需要每包解析 PROXY Protocol 头的无状态 UDP 负载均衡集群：
+
+```toml
+# frpc.toml
+[[proxies]]
+name = "udp-lb"
+type = "udp"
+localIP = "127.0.0.1"
+localPort = 5000
+remotePort = 5000
+transport.proxyProtocol = "v2"
+transport.proxyProtocolMode = "per-packet"
+```
+
+---
+
+### 4. Wire Protocol v2 与硬件级 AEAD 加密
+
+为控制信道提供现代密码学保护：
+
+```toml
+# 同时在 frps.toml 与 frpc.toml 中配置
+[transport]
+wireProtocol = "v2"
+requireKeyShare = true
+```
+详细设计请参阅 [Wire Protocol v2 说明文档 (doc/wire_protocol_v2.md)](doc/wire_protocol_v2.md)。
+
+---
+
+### 5. 服务端插件两阶段准入确认 (`NewProxyResult`)
+
+支持通过服务端 HTTP 插件实现准入事务联动：
+- `NewProxy`: 插件准备外部路由或配额。
+- `NewProxyResult`: 携带不可变 `attempt_id` 与准入状态 `admitted`，返回拒绝将撤回代理。
+- `CloseProxy`: 扩容至 2048 容量的非阻塞 FIFO 队列投递，支持指数退避重试。
+
+详细说明请参阅 [服务端插件文档 (doc/server_plugin.md)](doc/server_plugin.md)。
+
+---
+
+### 6. 独立监控与可观测性端口 (`metricsServer`)
+
+将 Prometheus 指标、健康检查与性能分析接口与管理仪表板隔离：
+
+```toml
+# 在 frps.toml 或 frpc.toml 中配置
+[metricsServer]
+addr = "127.0.0.1"
+port = 9100
+user = "admin"
+password = "metrics_secret_password"
+pprofEnable = true
+```
+
+---
+
+## 高并发与稳定性加固
+
+| 场景 | 上游高负载挑战 | 本分支解决方案 |
+| :--- | :--- | :--- |
+| **保活超时** | 半窗口（$T/2$）阈值在轻微网络抖动或 GC 暂停下易产生误断开 | 修正为四分之一窗口（$3/4\,T$）刷新，数学上消除抖动塌陷 |
+| **读工作协程** | 通道写满时可能造成读工作协程阻塞无法继续处理流量 | 采用 1024 容量非阻塞丢弃缓冲区，符合 RFC 768 规范 |
+| **套接字释放** | 转发器停止时连接需等待 30 秒超时才能释放 | 停止信号触发时立即同步关闭底层连接，瞬间释放临时端口 |
+| **堆内存开销** | 频繁连接创建产生大量未释放的 `time.After` 计时器 | 采用显式可停止计时器（`timer.Stop()`），大幅降低 GC 压力 |
+| **内存安全** | 缓冲写入器使用池化缓冲区时存在潜在内存复用别名风险 | 限制在单次本地切片分配内，消除 Use-after-free 风险 |
+
+---
+
+## 文档索引
+
+- [Linux 透明代理 (TPROXY) 配置指南 (doc/transparent_proxying.md)](doc/transparent_proxying.md)
+- [RFC 9221 QUIC 数据报中继指南 (doc/quic_datagrams.md)](doc/quic_datagrams.md)
+- [Wire Protocol v2 密码学设计 (doc/wire_protocol_v2.md)](doc/wire_protocol_v2.md)
+- [服务端插件两阶段确认 (doc/server_plugin.md)](doc/server_plugin.md)
+- [虚拟网络 TUN 配置 (doc/virtual_net.md)](doc/virtual_net.md)
+- [SSH 隧道网关指南 (doc/ssh_tunnel_gateway.md)](doc/ssh_tunnel_gateway.md)
+- [弃用特性生命周期追踪 (doc/deprecations.md)](doc/deprecations.md)
+
+---
+
+## 配置兼容性
+
+本分支与官方 upstream [fatedier/frp](https://github.com/fatedier/frp)（`v0.71.1`）保持完全的配置兼容。现有的 `.ini`、`.toml`、`.yaml` 及 `.json` 格式配置文件均可直接使用，无需修改任何历史配置。
+
+---
+
+## 开源协议
+
+遵循 [Apache 2.0 开源协议](LICENSE)。
