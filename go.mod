@@ -12,7 +12,7 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/onsi/ginkgo/v2 v2.23.4
 	github.com/onsi/gomega v1.36.3
-	github.com/pelletier/go-toml/v2 v2.2.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/client_model v0.5.0
