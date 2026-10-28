@@ -34,7 +34,7 @@ require (
 	golang.org/x/sys v0.49.0
 	golang.org/x/time v0.10.0
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173
-	gopkg.in/ini.v1 v1.67.0
+	gopkg.in/ini.v1 v1.67.3
 	k8s.io/apimachinery v0.28.8
 	k8s.io/client-go v0.28.8
 	k8s.io/utils v0.0.0-20230406110748-d93618cff8a2
