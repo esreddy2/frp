@@ -13,7 +13,7 @@ jobs:
     name: unit tests
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: actions/setup-go@v6
       with:
         go-version: '1.26'
@@ -31,7 +31,7 @@ jobs:
     name: e2e (legacy suites)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: actions/setup-go@v6
       with:
         go-version: '1.26'
@@ -63,7 +63,7 @@ jobs:
     name: e2e (v1 suites)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: actions/setup-go@v6
       with:
         go-version: '1.26'
@@ -92,7 +92,7 @@ jobs:
     name: e2e (compatibility)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: actions/setup-go@v6
       with:
         go-version: '1.26'
