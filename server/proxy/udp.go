@@ -70,6 +70,10 @@ type UDPProxy struct {
 	stopCh chan struct{}
 
 	isClosed bool
+
+	// dgSizeReporter throttles the reports of packets that do not fit
+	// into the datagram lane.
+	dgSizeReporter *udp.SizeReporter
 }
 
 func NewUDPProxy(baseProxy *BaseProxy) Proxy {
@@ -93,8 +97,9 @@ func NewUDPProxy(baseProxy *BaseProxy) Proxy {
 		baseProxy.udpDatagramWanted = false
 	}
 	return &UDPProxy{
-		BaseProxy: baseProxy,
-		cfg:       unwrapped,
+		BaseProxy:      baseProxy,
+		cfg:            unwrapped,
+		dgSizeReporter: udp.NewSizeReporter(udp.DatagramSizeReportInterval),
 	}
 }
 
@@ -256,8 +261,16 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 						)
 						continue
 					case errors.Is(dgErr, udp.ErrDatagramTooLarge), errors.Is(dgErr, udp.ErrDatagramHeaderTooLong):
+						var tooLarge *udp.DatagramTooLargeError
+						limit := 0
+						if errors.As(dgErr, &tooLarge) {
+							limit = tooLarge.Limit
+						}
 						if pxy.cfg.QUICDatagramStrict {
-							xl.Tracef("quic datagram lane: dropping oversized packet (%d bytes) in strict mode", len(udpMsg.Content))
+							if report, suffix := pxy.dgSizeReporter.ShouldReport(); report {
+								xl.Warnf("udp datagram lane: dropping a packet of %d bytes that exceeds the %d byte limit of proxy %s in strict mode%s",
+									len(udpMsg.Content), limit, pxy.GetName(), suffix)
+							}
 							continue
 						}
 						// The packet does not fit the datagram lane: the
@@ -267,6 +280,14 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 						// property of the proxy, not of the packet, so it
 						// must not be treated as a transport failure: the
 						// packet goes over the reliable stream instead.
+						// The fallback is reported, because a stream lane
+						// reintroduces the head-of-line blocking that the
+						// datagram lane avoids, and the operator can only
+						// see it in the log.
+						if report, suffix := pxy.dgSizeReporter.ShouldReport(); report {
+							xl.Warnf("udp datagram lane: a packet of %d bytes exceeds the %d byte limit of proxy %s, sending it over the reliable stream instead%s",
+								len(udpMsg.Content), limit, pxy.GetName(), suffix)
+						}
 					default:
 						// A terminal datagram send error tears down this
 						// work connection: the stale dgMux registration
@@ -352,7 +373,8 @@ func (pxy *UDPProxy) runWithStreams(xl *xlog.Logger, udpConn *net.UDPConn) {
 							}
 						})
 					})
-					xl.Infof("udp proxy relaying via quic datagrams")
+					xl.Infof("udp proxy relaying via quic datagrams (max frame %d bytes, %d bytes of frame overhead for the proxy name)",
+						udp.DatagramFrameBudget, udp.DatagramFrameHeaderOverhead+len(pxy.GetName()))
 				}
 			}
 

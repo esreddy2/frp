@@ -160,12 +160,12 @@ func TestEncodeDgramFrameRejectsOversizedPayload(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
 
 	// A payload that fits the frame budget is accepted.
-	_, err := encodeDgramFrame("p", addr, make([]byte, dgramFrameBudget-32))
+	_, err := encodeDgramFrame("p", addr, make([]byte, DatagramFrameBudget-32))
 	require.NoError(err)
 
 	// One that does not is rejected before the frame is built, so the
 	// caller can fall back to the reliable stream.
-	_, err = encodeDgramFrame("p", addr, make([]byte, dgramFrameBudget))
+	_, err = encodeDgramFrame("p", addr, make([]byte, DatagramFrameBudget))
 	require.ErrorIs(err, ErrDatagramTooLarge)
 }
 
@@ -375,7 +375,7 @@ func TestDatagramMuxSendFallsBackWhenTooLarge(t *testing.T) {
 	clientMux := DatagramMuxFor(clientConn)
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
 
-	err = clientMux.Send("proxy", addr, make([]byte, dgramFrameBudget+1))
+	err = clientMux.Send("proxy", addr, make([]byte, DatagramFrameBudget+1))
 	require.ErrorIs(err, ErrDatagramTooLarge)
 }
 

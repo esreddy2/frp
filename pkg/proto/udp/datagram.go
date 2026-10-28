@@ -45,7 +45,7 @@ import (
 const (
 	dgramFrameVersion = 0xF1
 
-	// dgramFrameBudget caps the whole encoded frame. quic-go's SendDatagram
+	// DatagramFrameBudget caps the whole encoded frame. quic-go's SendDatagram
 	// size check uses the current MTU estimate WITHOUT accounting for
 	// packet headers/AEAD overhead: frames in that gray zone are accepted
 	// and then silently dropped at packing time — a deterministic
@@ -53,13 +53,45 @@ const (
 	// budget (1252-byte initial packets minus ~50 bytes of overhead) so a
 	// frame that passes here always fits; anything larger falls back to
 	// the reliable stream.
-	dgramFrameBudget = 1180
+	//
+	// The budget covers the frame header and the user address as well, so
+	// the largest UDP payload that can be relayed is smaller than this
+	// value. Use MaxDatagramPayloadSize to compute it for a concrete
+	// proxy name and user address.
+	DatagramFrameBudget = 1180
+
+	// DatagramFrameHeaderOverhead is the number of bytes the frame header
+	// adds before the proxy name and the user address: the version byte,
+	// the proxy name length byte and the address length byte.
+	DatagramFrameHeaderOverhead = 3
 )
 
 // ErrDatagramTooLarge is returned by Send when the frame exceeds what the
 // QUIC connection can currently carry; callers should fall back to the
 // reliable work-connection stream for that packet.
 var ErrDatagramTooLarge = errors.New("udp datagram too large for quic path")
+
+// DatagramTooLargeError reports that a UDP payload does not fit into the
+// datagram lane. It carries the size of the payload and the largest payload
+// that would have fit, so the caller can tell the operator which limit was
+// reached instead of only reporting that something was too large.
+type DatagramTooLargeError struct {
+	// PayloadSize is the size of the UDP payload that did not fit.
+	PayloadSize int
+	// Limit is the largest UDP payload that fits into the datagram lane.
+	Limit int
+}
+
+func (e *DatagramTooLargeError) Error() string {
+	return fmt.Sprintf("udp datagram too large for quic path: payload %d bytes exceeds the %d byte limit",
+		e.PayloadSize, e.Limit)
+}
+
+// Is reports the error as ErrDatagramTooLarge, so the callers that only
+// distinguish "does not fit" from a transport failure keep working.
+func (e *DatagramTooLargeError) Is(target error) bool {
+	return target == ErrDatagramTooLarge
+}
 
 // ErrDatagramHeaderTooLong is returned by Send when a header field of the
 // frame does not fit: the proxy name is longer than the identifier field,
@@ -72,6 +104,32 @@ var ErrDatagramHeaderTooLong = errors.New("udp datagram header field too long")
 // maxDatagramAddrLength is the number of bytes of the encoded user address
 // that fit in the address length byte of a datagram frame.
 const maxDatagramAddrLength = 255
+
+// dgramFrameOverhead returns the number of bytes a frame spends on
+// everything except the UDP payload: the fixed header, the wire-level proxy
+// name and the encoded user address.
+func dgramFrameOverhead(name string, addr string) int {
+	return DatagramFrameHeaderOverhead + len(name) + len(addr)
+}
+
+// MaxDatagramPayloadSize returns the largest UDP payload that fits into the
+// datagram lane for the given wire-level proxy name and user address.
+//
+// The limit depends on the user address because the address is part of every
+// frame, and on the proxy name for the same reason. A payload of exactly
+// this size is still relayed as a datagram; one byte more does not fit.
+//
+// The address is measured as the same "ip:port" string the encoder writes,
+// so the result matches the encoder exactly. A nil address is treated as an
+// empty one, which yields the largest possible limit.
+func MaxDatagramPayloadSize(name string, remoteAddr *net.UDPAddr) int {
+	addrLen := 0
+	if remoteAddr != nil {
+		addrLen = len(remoteAddr.String())
+	}
+	limit := DatagramFrameBudget - dgramFrameOverhead(name, "") - addrLen
+	return max(limit, 0)
+}
 
 type dgramHandler func(remoteAddr *net.UDPAddr, payload []byte)
 
@@ -181,7 +239,12 @@ func (m *DatagramMux) Send(name string, remoteAddr *net.UDPAddr, payload []byte)
 	if err != nil {
 		var tooLarge *quic.DatagramTooLargeError
 		if errors.As(err, &tooLarge) {
-			return ErrDatagramTooLarge
+			// quic-go reports the limit for the whole datagram payload,
+			// which is the encoded frame. The UDP payload limit is smaller
+			// by the frame header, the proxy name and the user address.
+			limit := int(tooLarge.MaxDatagramPayloadSize) - dgramFrameOverhead(name, remoteAddr.String())
+			limit = max(limit, 0)
+			return &DatagramTooLargeError{PayloadSize: len(payload), Limit: limit}
 		}
 		return err
 	}
@@ -204,9 +267,12 @@ func encodeDgramFrame(name string, remoteAddr *net.UDPAddr, payload []byte) ([]b
 	// Enforce the budget before building the frame: MTU-sized payloads
 	// commonly exceed it and fall back to the stream, so don't pay an
 	// allocation and copy just to throw the frame away.
-	frameLen := 3 + len(name) + len(addr) + len(payload)
-	if frameLen > dgramFrameBudget {
-		return nil, ErrDatagramTooLarge
+	frameLen := dgramFrameOverhead(name, addr) + len(payload)
+	if frameLen > DatagramFrameBudget {
+		return nil, &DatagramTooLargeError{
+			PayloadSize: len(payload),
+			Limit:       MaxDatagramPayloadSize(name, remoteAddr),
+		}
 	}
 	frame := make([]byte, 0, frameLen)
 	frame = append(frame, dgramFrameVersion, byte(len(name)))

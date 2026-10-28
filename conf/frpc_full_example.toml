@@ -264,8 +264,12 @@ type = "udp"
 localIP = "114.114.114.114"
 localPort = 53
 remotePort = 6002
-# Enable RFC 9221 QUIC datagram relay for this UDP proxy (requires transport.protocol = "quic")
+# Enable RFC 9221 QUIC datagram relay for this UDP proxy (requires transport.protocol = "quic"
+# and a server that listens for quic on quicBindPort)
 # quicDatagrams = true
+# The relay header and the user address are part of every datagram frame, so only about
+# 1130-1165 bytes of a UDP packet fit into the datagram lane. Larger packets fall back to
+# the reliable stream, and frpc logs a warning when that happens.
 # In strict mode, oversized datagrams are dropped instead of falling back to stream,
 # preserving packet ordering and anti-replay windows for WireGuard, DTLS, and voice/game traffic
 # quicDatagramStrict = false

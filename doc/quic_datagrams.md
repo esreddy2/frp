@@ -25,9 +25,34 @@ This fork introduces native support for **RFC 9221 QUIC Datagrams**, allowing UD
 
 ## Datagram Sizing & MTU Boundaries
 
-QUIC datagrams are subject to the path Maximum Transmission Unit (PMTU) and the QUIC packet overhead:
-- The maximum datagram payload size supported by frp is **1200 bytes** (`MaxQuicDatagramSize = 1200`), chosen to reliably avoid fragmentation across standard Internet paths with a 1280-byte IPv6 minimum MTU.
-- Accounted for framing headers (identifier, addresses), the maximum single UDP packet payload relayed via datagram is approximately **1140–1180 bytes**.
+QUIC datagrams are subject to the path Maximum Transmission Unit (PMTU) and the QUIC packet overhead, so every relayed packet is framed into a small binary header before it is sent:
+
+```
+[0]        version                       1 byte
+[1]        len(proxy name)               1 byte
+[2:2+n]    proxy name                    n bytes
+[+0]       len(user address)             1 byte
+[+1:+1+a]  user address ("ip:port")      a bytes
+[rest]     raw UDP payload               p bytes
+```
+
+The whole frame has to fit into one QUIC packet, so frp caps it at **1180 bytes** (`DatagramFrameBudget` in `pkg/proto/udp/datagram.go`). The cap covers the header and the user address, so the **largest UDP payload that can be relayed as a datagram is smaller than 1180 bytes**:
+
+```
+max payload = 1180 - 3 - len(proxy name) - len("ip:port" address)
+```
+
+Worked examples:
+
+| proxy name | user address | max UDP payload |
+|------------|--------------|-----------------|
+| `game` (4 bytes) | `10.0.0.7:40000` (14 bytes) | 1159 bytes |
+| `dns-datagram` (12 bytes) | `192.168.1.100:51234` (19 bytes) | 1146 bytes |
+| `game` (4 bytes) | `[2001:db8::1]:40000` (18 bytes) | 1155 bytes |
+
+In practice the usable payload is roughly **1130–1165 bytes**. The number varies per packet, because the user address is part of every frame and its length depends on the address family and the source port. frp computes the exact limit for the packet it is about to send, so the boundary is never crossed by accident.
+
+If the path itself is smaller than the frame budget (a tunnel with an MTU below 1200 bytes for example), the QUIC connection reports a lower limit and the same fallback happens for the packets above it.
 
 ### Fallback vs. Strict Mode (`quicDatagramStrict`)
 
@@ -42,6 +67,8 @@ When an incoming UDP packet exceeds the maximum datagram payload size:
    - **Why Strict Mode Matters for VPNs & Replay-Sensitive Traffic:**
      Protocols like **WireGuard**, **IPsec**, and **DTLS** implement anti-replay sliding windows. If a sequence of packets is split between the unreliable datagram lane (low latency, immediate delivery) and the reliable stream lane (retransmitted, queued), the stream-delayed packets will arrive far behind the datagram packets. This causes the anti-replay window to advance past the delayed packets, resulting in spurious replay rejections and tunnel stalls.
    - Enabling `quicDatagramStrict = true` guarantees strict lane isolation: packets never experience dual-lane reordering.
+
+Both modes report the event: `frpc` and `frps` log a warning that names the size of the packet and the limit that was reached, at most once per minute per proxy, so a stream of oversized packets cannot flood the log. The warning is the only place where the fallback is visible, so it is worth watching after a deployment.
 
 ---
 
@@ -100,5 +127,6 @@ The client always dials QUIC over UDP on the port it is configured with (`server
 
 ## Operational Best Practices
 
-1. **WireGuard MTU Tuning:** When tunneling WireGuard over FRP QUIC datagrams, configure the WireGuard interface MTU to `1180` (e.g. `MTU = 1180` in `wg0.conf`). This ensures all encrypted WireGuard packets fit cleanly within the QUIC datagram budget without triggering fragmentation or drops.
-2. **Buffer Sizing:** This fork uses 1024-packet non-blocking drop-on-saturation worker queues for UDP datagrams, conforming strictly to RFC 768 semantics under burst loads.
+1. **WireGuard MTU Tuning:** A WireGuard packet adds 32 bytes to the tunneled IP packet (16-byte message header plus the 16-byte Poly1305 tag), and the relay header takes another 20 to 40 bytes of the datagram frame. With a usable payload of about 1145 bytes, the WireGuard interface MTU has to stay below 1115 bytes: configure `MTU = 1100` (e.g. `MTU = 1100` in `wg0.conf`). A larger MTU produces packets that do not fit into the datagram lane, so every one of them falls back to the reliable stream or is dropped in strict mode.
+2. **Watch the oversize warning:** `frpc` and `frps` log a warning when a packet does not fit into the datagram lane. A steady stream of those warnings means that the tunneled traffic carries packets that are too large, and the fix is a smaller MTU on the tunneled interface rather than a larger limit in frp.
+3. **Buffer Sizing:** This fork uses 1024-packet non-blocking drop-on-saturation worker queues for UDP datagrams, conforming strictly to RFC 768 semantics under burst loads.

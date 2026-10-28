@@ -326,8 +326,9 @@ type UDPProxyConfig struct {
 	// retransmission for payloads that tolerate loss themselves (VPN
 	// DTLS, WireGuard, RTP). Requires transport.protocol = "quic" and a
 	// server with datagram support; falls back to the stream otherwise.
-	// Packets exceeding the QUIC datagram budget for the path
-	// (~1200-1400 bytes) also fall back to the stream per-packet.
+	// The relay header and the user address are part of every datagram
+	// frame, so only about 1130-1165 bytes of a UDP packet fit into the
+	// datagram lane; larger packets fall back to the stream per-packet.
 	// Incompatible with useEncryption/useCompression (stream wrappers).
 	QUICDatagrams bool `json:"quicDatagrams,omitempty"`
 
