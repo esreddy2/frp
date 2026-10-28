@@ -19,7 +19,7 @@ require (
 	github.com/prometheus/common v0.48.0
 	github.com/quic-go/quic-go v0.60.0
 	github.com/rodaine/table v1.2.0
-	github.com/samber/lo v1.47.0
+	github.com/samber/lo v1.53.0
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.10
