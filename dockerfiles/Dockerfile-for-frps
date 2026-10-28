@@ -1,4 +1,4 @@
-FROM node:22 AS web-builder
+FROM node:25 AS web-builder
 
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
