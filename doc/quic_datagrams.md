@@ -50,6 +50,7 @@ When an incoming UDP packet exceeds the maximum datagram payload size:
 QUIC datagram relay requires both QUIC transport on the client-server connection and an explicit opt-in on each UDP proxy:
 
 - **Transport:** Set `transport.protocol = "quic"` in `frpc.toml`.
+- **Server:** Set `quicBindPort` in `frps.toml` to the UDP port the client connects to. QUIC is disabled without it.
 - **Proxy:** Set `quicDatagrams = true` on each UDP proxy. If omitted (or set to `false`), the proxy continues using reliable QUIC streams.
 - **Constraints:** Because datagram forwarding bypasses stream-level framing, `quicDatagrams = true` cannot be combined with `transport.useEncryption` or `transport.useCompression` on the same proxy.
 
@@ -86,9 +87,14 @@ quicDatagramStrict = true
 
 ```toml
 bindPort = 7000
-# QUIC runs on bindPort over UDP
+# QUIC is a separate UDP listener. It is disabled unless quicBindPort is set,
+# and it can use the same port number as bindPort, because bindPort is a TCP
+# port.
+quicBindPort = 7000
 transport.quic.enableDatagrams = true
 ```
+
+The client always dials QUIC over UDP on the port it is configured with (`serverPort` in `frpc.toml`), so `quicBindPort` has to be the port the client uses — usually the same number as `bindPort`. When `quicBindPort` is `0`, `frps` does not listen for QUIC at all: a client with `transport.protocol = "quic"` then fails to connect, and `frps` says so in its startup log. The client names the same setting in the error it reports, because a missing QUIC listener is otherwise indistinguishable from a broken path.
 
 ---
 

@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -159,12 +160,14 @@ func (c *defaultConnectorImpl) Open() error {
 			// client's credential, and 0-RTT early data is replayable.
 			quicConfig.TokenStore = quic.NewLRUTokenStore(100, 10)
 		}
+		serverAddr := net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort))
 		conn, err := quic.DialAddr(
 			c.ctx,
-			net.JoinHostPort(c.cfg.ServerAddr, strconv.Itoa(c.cfg.ServerPort)),
+			serverAddr,
 			tlsConfig, quicConfig)
 		if err != nil {
-			return err
+			return fmt.Errorf("dial quic server %s: %w (the server must listen for quic on udp port %d: set quicBindPort in the server config)",
+				serverAddr, err, c.cfg.ServerPort)
 		}
 		c.quicConn = conn
 		return nil

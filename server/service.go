@@ -322,6 +322,12 @@ func NewService(cfg *v1.ServerConfig) (svr *Service, err error) {
 			return nil, fmt.Errorf("listen on quic udp address %s error: %v", address, err)
 		}
 		log.Infof("frps quic listen on %s", address)
+	} else {
+		// QUIC is opt-in, and the client always dials it over UDP on the
+		// port it is configured with. Without this notice a server that
+		// forgot quicBindPort looks like a network problem: the client's
+		// handshake times out instead of reporting a misconfiguration.
+		log.Infof("frps quic is disabled (quicBindPort = 0), clients with transport.protocol = \"quic\" will not be able to connect")
 	}
 
 	if cfg.SSHTunnelGateway.BindPort > 0 {
