@@ -2,6 +2,7 @@ package basic
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -265,7 +266,8 @@ var _ = ginkgo.Describe("[Feature: HTTP]", func() {
 		localServer := httpserver.New(
 			httpserver.WithBindPort(localPort),
 			httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				_, _ = w.Write([]byte(req.Header.Get("X-From-Where")))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte(html.EscapeString(req.Header.Get("X-From-Where"))))
 			})),
 		)
 		f.RunServer("", localServer)

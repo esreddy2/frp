@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -150,6 +151,9 @@ func NewPortsRangeSliceFromString(str string) ([]PortsRange, error) {
 			if err != nil {
 				return nil, fmt.Errorf("range number is invalid, %v", err)
 			}
+			if singleNum < math.MinInt || singleNum > math.MaxInt {
+				return nil, fmt.Errorf("range number is invalid")
+			}
 			out = append(out, PortsRange{Single: int(singleNum)})
 		case 2:
 			// range numbers
@@ -162,6 +166,9 @@ func NewPortsRangeSliceFromString(str string) ([]PortsRange, error) {
 				return nil, fmt.Errorf("range number is invalid, %v", err)
 			}
 			if maxNum < minNum {
+				return nil, fmt.Errorf("range number is invalid")
+			}
+			if minNum < math.MinInt || minNum > math.MaxInt || maxNum < math.MinInt || maxNum > math.MaxInt {
 				return nil, fmt.Errorf("range number is invalid")
 			}
 			out = append(out, PortsRange{Start: int(minNum), End: int(maxNum)})

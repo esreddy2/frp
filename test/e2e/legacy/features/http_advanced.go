@@ -2,6 +2,7 @@ package features
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 
 	"github.com/onsi/ginkgo/v2"
@@ -144,7 +145,8 @@ Please try again later.</p>
 		f.RunServer("", httpserver.New(
 			httpserver.WithBindPort(localPort),
 			httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				_, _ = w.Write([]byte(req.Header.Get("X-Custom-Header")))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte(html.EscapeString(req.Header.Get("X-Custom-Header"))))
 			})),
 		))
 

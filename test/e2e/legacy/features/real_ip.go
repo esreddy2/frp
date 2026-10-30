@@ -3,6 +3,7 @@ package features
 import (
 	"bufio"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 
@@ -31,7 +32,8 @@ var _ = ginkgo.Describe("[Feature: Real IP]", func() {
 		localServer := httpserver.New(
 			httpserver.WithBindPort(localPort),
 			httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				_, _ = w.Write([]byte(req.Header.Get("X-Forwarded-For")))
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				_, _ = w.Write([]byte(html.EscapeString(req.Header.Get("X-Forwarded-For"))))
 			})),
 		)
 		f.RunServer("", localServer)

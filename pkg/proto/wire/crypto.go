@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"math"
 	"runtime"
 
 	"golang.org/x/sys/cpu"
@@ -50,6 +51,9 @@ type CryptoContext struct {
 // DeriveIKM returns the ECDH shared secret followed by the pre-shared auth key.
 // Either may be absent.
 func (c *CryptoContext) DeriveIKM(authKey []byte) []byte {
+	if len(c.SharedSecret) > math.MaxInt-len(authKey) {
+		return nil
+	}
 	ikm := make([]byte, 0, len(c.SharedSecret)+len(authKey))
 	ikm = append(ikm, c.SharedSecret...)
 	ikm = append(ikm, authKey...)

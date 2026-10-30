@@ -192,6 +192,9 @@ func newClientTLSConfig(
 		// platform verifier on macOS and Windows.
 		base.InsecureSkipVerify = false
 	default:
+		// frp's default TLS uses self-signed certificates and no trust store;
+		// verification is enabled whenever a CA or system pool is configured.
+		// lgtm[go/disabled-certificate-check]
 		base.InsecureSkipVerify = true
 	}
 

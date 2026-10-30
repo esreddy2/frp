@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 
 	"github.com/fatedier/frp/pkg/proto/wire"
@@ -185,6 +186,9 @@ func EncodeV2MessageFrame(m Message) (*wire.Frame, error) {
 	content, err := json.Marshal(m)
 	if err != nil {
 		return nil, err
+	}
+	if len(content) > math.MaxInt-2 {
+		return nil, fmt.Errorf("encoded message too large")
 	}
 	payload := make([]byte, 2+len(content))
 	binary.BigEndian.PutUint16(payload[:2], typeID)

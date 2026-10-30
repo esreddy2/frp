@@ -49,6 +49,8 @@ func RandIDWithLen(idLen int) (id string, err error) {
 
 func GetAuthKey(token string, timestamp int64) (key string) {
 	md5Ctx := md5.New()
+	// MD5 is used to derive a frp challenge-response auth token, not for password storage; changing it would break protocol compatibility between frp peers.
+	// lgtm[go/weak-sensitive-data-hashing]
 	md5Ctx.Write([]byte(token))
 	md5Ctx.Write([]byte(strconv.FormatInt(timestamp, 10)))
 	data := md5Ctx.Sum(nil)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -396,7 +397,8 @@ var _ = ginkgo.Describe("[Feature: Client-Plugins]", func() {
 			localServer := httpserver.New(
 				httpserver.WithBindPort(localPort),
 				httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					_, _ = w.Write([]byte(req.Header.Get("x-from-where")))
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					_, _ = w.Write([]byte(html.EscapeString(req.Header.Get("x-from-where"))))
 				})),
 			)
 			f.RunServer("", localServer)

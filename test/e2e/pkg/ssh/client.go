@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"net"
+	"os"
 
 	libio "github.com/fatedier/golib/io"
 	"golang.org/x/crypto/ssh"
@@ -25,9 +26,14 @@ func NewTunnelClient(localAddr string, sshServer string, commands string) *Tunne
 }
 
 func (c *TunnelClient) Start() error {
+	hostKey, err := loadServerHostKey()
+	if err != nil {
+		return err
+	}
+
 	config := &ssh.ClientConfig{
 		User:            "v0",
-		HostKeyCallback: func(string, net.Addr, ssh.PublicKey) error { return nil },
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
 	}
 
 	conn, err := ssh.Dial("tcp", c.sshServer, config)
@@ -58,6 +64,18 @@ func (c *TunnelClient) Start() error {
 
 	go c.serveListener()
 	return nil
+}
+
+func loadServerHostKey() (ssh.PublicKey, error) {
+	keyBytes, err := os.ReadFile(".autogen_ssh_key")
+	if err != nil {
+		return nil, err
+	}
+	signer, err := ssh.ParsePrivateKey(keyBytes)
+	if err != nil {
+		return nil, err
+	}
+	return signer.PublicKey(), nil
 }
 
 func (c *TunnelClient) Close() {
